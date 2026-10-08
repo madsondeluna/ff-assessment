@@ -1,0 +1,43 @@
+; npt.mdp (charmm36) - 100 ps NPT, heavy-atom position restraints
+define                   = -DPOSRES
+integrator               = md
+dt                       = 0.002
+nsteps                   = 50000
+; Output
+nstxout                  = 500
+nstvout                  = 500
+nstenergy                = 500
+nstlog                   = 500
+; Temperature coupling
+tcoupl                   = V-rescale
+tc-grps                  = Protein Non-Protein
+tau-t                    = 0.1 0.1
+ref-t                    = 300 300
+; Pressure coupling
+pcoupl                   = C-rescale
+pcoupltype               = isotropic
+tau-p                    = 2.0       ; ps
+ref-p                    = 1.0
+compressibility          = 4.5e-5    ; bar^-1, water
+refcoord-scaling         = com
+; Continuation from NVT
+continuation             = yes
+gen-vel                  = no
+pbc                      = xyz
+; --- Constraints: CHARMM36 (bonds to hydrogen) ------------------------------
+constraints              = h-bonds
+constraint-algorithm     = lincs
+lincs-iter               = 1
+lincs-order              = 4
+; --- Nonbonded: CHARMM36 / CHARMM36m recommended settings ---------------------
+cutoff-scheme            = Verlet
+nstlist                  = 10        ; adjusted automatically by mdrun
+coulombtype              = PME
+rcoulomb                 = 1.2       ; nm
+vdwtype                  = Cut-off
+vdw-modifier             = Force-switch
+rvdw-switch              = 1.0       ; nm, LJ forces smoothly switched to zero
+rvdw                     = 1.2       ; nm
+DispCorr                 = no        ; CHARMM36 was parametrized without it
+pme-order                = 4
+fourierspacing           = 0.16      ; nm

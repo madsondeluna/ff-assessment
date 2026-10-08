@@ -1,0 +1,18 @@
+; em.mdp (charmm36) - steepest descent energy minimization
+integrator               = steep
+emtol                    = 1000.0    ; kJ/mol/nm, stop when Fmax < emtol
+emstep                   = 0.01      ; nm
+nsteps                   = 50000
+pbc                      = xyz
+; --- Nonbonded: CHARMM36 / CHARMM36m recommended settings ---------------------
+cutoff-scheme            = Verlet
+nstlist                  = 10        ; adjusted automatically by mdrun
+coulombtype              = PME
+rcoulomb                 = 1.2       ; nm
+vdwtype                  = Cut-off
+vdw-modifier             = Force-switch
+rvdw-switch              = 1.0       ; nm, LJ forces smoothly switched to zero
+rvdw                     = 1.2       ; nm
+DispCorr                 = no        ; CHARMM36 was parametrized without it
+pme-order                = 4
+fourierspacing           = 0.16      ; nm

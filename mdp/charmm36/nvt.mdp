@@ -1,0 +1,40 @@
+; nvt.mdp (charmm36) - 100 ps NVT, heavy-atom position restraints
+define                   = -DPOSRES
+integrator               = md        ; leap-frog
+dt                       = 0.002
+nsteps                   = 50000
+; Output
+nstxout                  = 500
+nstvout                  = 500
+nstenergy                = 500
+nstlog                   = 500
+; Temperature coupling
+tcoupl                   = V-rescale
+tc-grps                  = Protein Non-Protein
+tau-t                    = 0.1 0.1   ; ps
+ref-t                    = 300 300
+; Pressure coupling
+pcoupl                   = no
+; Velocities
+continuation             = no
+gen-vel                  = yes
+gen-temp                 = 300
+gen-seed                 = @SEED@    ; replaced per replica by 01_prepare.sh
+pbc                      = xyz
+; --- Constraints: CHARMM36 (bonds to hydrogen) ------------------------------
+constraints              = h-bonds
+constraint-algorithm     = lincs
+lincs-iter               = 1
+lincs-order              = 4
+; --- Nonbonded: CHARMM36 / CHARMM36m recommended settings ---------------------
+cutoff-scheme            = Verlet
+nstlist                  = 10        ; adjusted automatically by mdrun
+coulombtype              = PME
+rcoulomb                 = 1.2       ; nm
+vdwtype                  = Cut-off
+vdw-modifier             = Force-switch
+rvdw-switch              = 1.0       ; nm, LJ forces smoothly switched to zero
+rvdw                     = 1.2       ; nm
+DispCorr                 = no        ; CHARMM36 was parametrized without it
+pme-order                = 4
+fourierspacing           = 0.16      ; nm

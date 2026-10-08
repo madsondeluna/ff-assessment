@@ -1,0 +1,16 @@
+; ions.mdp (charmm36) - input for gmx genion only, never run
+integrator               = steep
+emtol                    = 1000.0
+emstep                   = 0.01
+nsteps                   = 50000
+pbc                      = xyz
+; --- Nonbonded: CHARMM36 / CHARMM36m recommended settings ---------------------
+cutoff-scheme            = Verlet
+nstlist                  = 10        ; adjusted automatically by mdrun
+coulombtype              = Cut-off   ; genion only
+rcoulomb                 = 1.2       ; nm
+vdwtype                  = Cut-off
+vdw-modifier             = Force-switch
+rvdw-switch              = 1.0       ; nm, LJ forces smoothly switched to zero
+rvdw                     = 1.2       ; nm
+DispCorr                 = no        ; CHARMM36 was parametrized without it

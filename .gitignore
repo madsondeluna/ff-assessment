@@ -1,0 +1,19 @@
+# Simulation and analysis outputs (large, regenerable)
+runs/
+analysis/
+
+# Force field ports downloaded by the user (licensing: redistribute only the
+# files you are allowed to; the CHARMM36 port is downloaded from the
+# MacKerell lab website)
+forcefields/*.ff/
+forcefields/*.tgz
+
+# GROMACS backups and temporary files
+\#*\#
+*.trr
+*.cpt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
