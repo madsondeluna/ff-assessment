@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # =============================================================================
 # config.sh
-# Central configuration for the four-way force field comparison of eIF4E:
+# Central configuration for the four-way force field comparison of a protein
+# (ubiquitin, PDB 1UBQ, by default):
 #   CHARMM36m | AMBER (ff14SB by default) | GROMOS 53A6 | GROMOS 54A7
 # Every script in scripts/ sources this file. Any variable can be overridden
 # from the environment, e.g.:  PROD_NS=10 NT=8 bash scripts/01_prepare.sh
@@ -30,9 +31,19 @@ MAXWARN="${MAXWARN:-0}"
 # -----------------------------------------------------------------------------
 # Input structure
 # -----------------------------------------------------------------------------
-# Experimental or modelled eIF4E structure (PDB format). Ligands, waters,
-# ions and non-protein residues are removed automatically.
-INPUT_PDB="${INPUT_PDB:-input/eif4e.pdb}"
+# PDB entry to download and clean automatically when INPUT_PDB is missing
+# (scripts/get_structure.sh). 1UBQ is human ubiquitin at 1.8 A: 76 residues,
+# no gaps, no disulfides, one alpha helix, one 3-10 helix and a five-stranded
+# mixed beta sheet, which makes it a good small alpha/beta test case for
+# secondary structure (lysozyme, 1AKI, is almost all helix). Alternatives:
+# 1PGA (protein G B1, 56 residues, one helix + four strands). Set PDB_ID=""
+# to disable the download and provide INPUT_PDB yourself.
+PDB_ID="${PDB_ID:-1UBQ}"
+
+# Input structure (PDB format): the cleaned download above, or any
+# experimental or modelled structure. Ligands, waters, ions and non-protein
+# residues are removed automatically; hydrogens are rebuilt by pdb2gmx.
+INPUT_PDB="${INPUT_PDB:-input/1ubq.pdb}"
 
 # Chain(s) to keep, e.g. "A" or "AB". Empty keeps all protein chains.
 CHAIN="${CHAIN-A}"
@@ -131,9 +142,20 @@ SKIP_NS="${SKIP_NS:-10}"
 # Stride for the expensive analyses (ps). 0 = every saved frame.
 HB_WATER_DT_PS="${HB_WATER_DT_PS:-0}"
 MDMAT_DT_PS="${MDMAT_DT_PS:-100}"
+DSSP_DT_PS="${DSSP_DT_PS:-100}"     # secondary structure (gmx dssp) per frame
 
 # Contact-map cutoff used by gmx mdmat (nm).
 MDMAT_CUTOFF="${MDMAT_CUTOFF:-1.5}"
+
+# -----------------------------------------------------------------------------
+# Execution
+# -----------------------------------------------------------------------------
+# Production runs are strictly sequential (one mdrun at a time). RUN_ORDER
+# decides the sequence: "replica" runs replica 1 of every force field first,
+# then replica 2, ... so that a partial campaign already allows a one-replica
+# comparison; "forcefield" finishes all replicas of one force field before
+# starting the next.
+RUN_ORDER="${RUN_ORDER:-replica}"
 
 # -----------------------------------------------------------------------------
 # Paths (relative to the repository root)
@@ -143,3 +165,4 @@ RUN_DIR="${RUN_DIR:-runs}"
 ANA_DIR="${ANA_DIR:-analysis}"
 FIG_DIR="${FIG_DIR:-figures}"
 FF_DIR="${FF_DIR:-forcefields}"
+LOG_DIR="${LOG_DIR:-logs}"          # pipeline and production logs

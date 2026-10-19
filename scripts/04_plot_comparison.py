@@ -23,6 +23,10 @@
 #   fig5_sasa_per_residue    heavy-atom SASA per residue + difference vs reference
 #   fig6_quality_checks      EM, NVT, NPT and production thermodynamics
 #   fig7_replicas            per-replica time series and RMSF for each force field
+#   fig8_dssp_maps           secondary structure per residue and time (DSSP), one
+#                            panel per replica: helix dark blue, strand red, coil white
+#   fig9_dssp_content        helix and strand content vs time, and per-residue
+#                            helix / strand probability vs the input structure
 # Tables:
 #   summary_statistics.csv   mean, SD and block SEM per observable, replica
 #                            and force field (replica "all" = mean +/- SD of
@@ -49,7 +53,8 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless backend: works on servers without a display
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap, TwoSlopeNorm
+from matplotlib.patches import Patch
 
 try:
     from scipy import stats as _scipy_stats
@@ -79,7 +84,6 @@ REP_STYLE = ["-", "--", ":", "-.", (0, (5, 1, 1, 1))]  # one line style per repl
 
 INK = "#0b0b0b"
 INK_2 = "#52514e"
-GRID = "#e4e3df"
 
 # Sequential (one hue, dark = close contact) and diverging (blue - gray - red)
 SEQ_CMAP = LinearSegmentedColormap.from_list(
@@ -96,9 +100,7 @@ plt.rcParams.update({
     "axes.linewidth": 0.6,
     "axes.spines.top": False,
     "axes.spines.right": False,
-    "axes.grid": True,
-    "grid.color": GRID,
-    "grid.linewidth": 0.5,
+    "axes.grid": False,
     "xtick.color": INK_2,
     "ytick.color": INK_2,
     "xtick.major.width": 0.6,
@@ -314,9 +316,54 @@ OBSERVABLES = [
     ("sasa_native", "sasa_native.xvg", 1, "SASA (nm$^2$)", "SASA, all atoms of each model"),
 ]
 # Observables reported in summary_table.csv (time series + mean RMSF)
-TABLE_OBSERVABLES = ["rmsd", "rg", "rmsf_mean", "hb_intra", "hb_water", "sasa_heavy"]
+TABLE_OBSERVABLES = ["rmsd", "rg", "rmsf_mean", "hb_intra", "hb_water", "sasa_heavy",
+                     "ss_helix", "ss_strand", "ss_coil", "ss_retained"]
 TABLE_UNITS = {"rmsd": "nm", "rg": "nm", "rmsf_mean": "nm", "hb_intra": "count",
-               "hb_water": "count", "sasa_heavy": "nm^2"}
+               "hb_water": "count", "sasa_heavy": "nm^2", "ss_helix": "% residues",
+               "ss_strand": "% residues", "ss_coil": "% residues", "ss_retained": "% residues"}
+
+# --- Secondary structure (gmx dssp) -------------------------------------------
+# DSSP letters reduced to three classes, as in most force field benchmarks:
+# helix = H (alpha), G (3-10), I (pi); strand = E (ladder), B (bridge);
+# coil = everything else (T turn, S bend, P polyproline, ~ loop, = break).
+SS_CLASS = {"H": 1, "G": 1, "I": 1, "E": 2, "B": 2}
+SS_NAMES = ["coil", "helix", "strand"]
+SS_COLORS = ["#ffffff", "#0d2b6b", "#c0392b"]   # white, dark blue, red
+SS_CMAP = ListedColormap(SS_COLORS)
+SS_NORM = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], SS_CMAP.N)
+
+
+def read_dssp(path):
+    """Read a gmx dssp .dat file: one string of DSSP letters per frame.
+
+    Lines that start with a numeric token (a time column in some versions)
+    have it stripped. Returns an int array (frames x residues) with the
+    three classes of SS_CLASS. Frames with a different length (should not
+    happen) are dropped.
+    """
+    rows = []
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "@")):
+            continue
+        parts = line.split()
+        letters = parts[-1] if len(parts) > 1 else parts[0]
+        rows.append([SS_CLASS.get(c, 0) for c in letters])
+    if not rows:
+        raise ValueError(f"no frames in {path}")
+    n = max(len(r) for r in rows)
+    return np.array([r for r in rows if len(r) == n], dtype=np.int8)
+
+
+def dssp_time_ns(rep_dir, nframes):
+    """Frame times (ns) of a dssp.dat, from the interval stored in meta.txt."""
+    dt_ps = float(read_meta(rep_dir).get("dssp_dt_ps", 100))
+    return np.arange(nframes) * dt_ps / 1000.0
+
+
+def ss_legend(ax, loc="upper right", **kw):
+    handles = [Patch(facecolor=c, edgecolor="black", lw=0.6, label=n) for n, c in zip(SS_NAMES, SS_COLORS)]
+    ax.legend(handles=handles, loc=loc, **kw)
 
 
 def load_series(rep_dir, fname, col):
@@ -458,7 +505,6 @@ def fig_distributions(found, skip_ns, fig_dir, formats, stats_rows):
         ax.set_title(SHORT_TITLE.get(key, title), loc="left", color=INK, fontsize=8.5)
         ax.set_xlabel(xlabel)
         ax.set_yticks([])
-        ax.grid(axis="y", visible=False)
     axes[0].set_ylabel("Probability density")
     handles = [plt.Line2D([], [], color=color_of(f), lw=2, label=name_of(f)) for f in found]
     fig.legend(handles=handles, loc="upper right", ncol=len(handles), bbox_to_anchor=(0.995, 1.02))
@@ -569,7 +615,6 @@ def fig_contact_maps(found, reference, cutoff, fig_dir, formats):
                        interpolation="nearest", aspect="equal")
         ax.set_title(f"{name_of(ff)}: mean min. distance", loc="left", color=INK)
         ax.set_xlabel("Residue")
-        ax.grid(False)
         cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
         cb.set_label("Distance (nm)")
     axes[0][0].set_ylabel("Residue")
@@ -584,7 +629,6 @@ def fig_contact_maps(found, reference, cutoff, fig_dir, formats):
                            interpolation="nearest", aspect="equal")
             ax.set_title(f"{name_of(ff)} minus {name_of(reference)}", loc="left", color=INK)
             ax.set_xlabel("Residue")
-            ax.grid(False)
             cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
             cb.set_label(f"$\\Delta$ distance (nm); <0: closer in {name_of(ff)}")
         axes[1][0].set_ylabel("Residue")
@@ -685,6 +729,149 @@ def fig_replicas(found, skip_ns, smooth_ns, fig_dir, formats):
                  f"gray band: first {skip_ns:g} ns)", x=0.01, ha="left", fontsize=9, color=INK_2)
     fig.tight_layout()
     save(fig, fig_dir, "fig7_replicas", formats)
+
+
+def load_dssp(found):
+    """{ff: [(time_ns, classes frames x residues), ...]} for every replica."""
+    out = {}
+    for ff, reps in found.items():
+        items = []
+        for rep in reps:
+            p = rep / "dssp.dat"
+            if p.exists():
+                cls = read_dssp(p)
+                items.append((dssp_time_ns(rep, len(cls)), cls))
+        if items:
+            out[ff] = items
+    return out
+
+
+def load_dssp_input(ana_dir):
+    """Classes of the input structure (1 x residues), or None."""
+    p = ana_dir / "dssp_input.dat"
+    return read_dssp(p)[0] if p.exists() else None
+
+
+def fig_dssp_maps(dssp, skip_ns, fig_dir, formats):
+    """Residue (y) vs time (x) per replica; rows are force fields."""
+    if not dssp:
+        print("  skipped fig8_dssp_maps: dssp.dat not found")
+        return
+    nrows = len(dssp)
+    ncols = max(len(v) for v in dssp.values())
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.6 * ncols + 0.6, 2.4 * nrows + 0.6),
+                             squeeze=False, sharex=True, sharey=True)
+    for i, (ff, items) in enumerate(dssp.items()):
+        for j in range(ncols):
+            ax = axes[i][j]
+            if j >= len(items):
+                ax.axis("off")
+                continue
+            t, cls = items[j]
+            nres = cls.shape[1]
+            dt = t[1] - t[0] if len(t) > 1 else 0.1
+            ax.imshow(cls.T, aspect="auto", origin="lower", cmap=SS_CMAP, norm=SS_NORM,
+                      interpolation="nearest", extent=[t[0], t[-1] + dt, 0.5, nres + 0.5])
+            if skip_ns > 0:
+                ax.axvline(skip_ns, color=INK_2, lw=0.6, ls=":")
+            for sp in ax.spines.values():
+                sp.set_visible(True)
+            if i == 0:
+                ax.set_title(f"replica {j + 1}", loc="left", color=INK)
+            if j == 0:
+                ax.set_ylabel("Residue")
+                ax.text(-0.3, 0.5, name_of(ff), transform=ax.transAxes, rotation=90,
+                        ha="center", va="center", color=color_of(ff), fontsize=10, fontweight="bold")
+            if i == nrows - 1:
+                ax.set_xlabel("Time (ns)")
+    ss_legend(axes[0][-1] if axes[0][-1].axison else axes[0][0], loc="upper right",
+              ncol=3, fontsize=8, bbox_to_anchor=(1.0, 1.32))
+    fig.suptitle("Secondary structure (DSSP, three classes); dotted line: start of the averaging window",
+                 x=0.01, ha="left", fontsize=9, color=INK_2)
+    fig.tight_layout()
+    save(fig, fig_dir, "fig8_dssp_maps", formats)
+
+
+def fig_dssp_content(dssp, ss_input, skip_ns, smooth_ns, fig_dir, formats):
+    """Helix / strand content vs time (replica mean, min-max band) and
+    per-residue helix / strand probability over the averaging window, with
+    the input structure as a reference track."""
+    if not dssp:
+        print("  skipped fig9_dssp_content: dssp.dat not found")
+        return
+    fig, axes = plt.subplots(2, 2, figsize=(11, 6.4), gridspec_kw={"width_ratios": [1, 1.4]})
+    for row, (cls_id, label) in enumerate([(1, "helix"), (2, "strand")]):
+        axt, axr = axes[row]
+        shade_skip(axt, skip_ns)
+        for ff, items in dssp.items():
+            n = min(len(t) for t, _ in items)
+            t = items[0][0][:n]
+            frac = np.vstack([100.0 * (cls[:n] == cls_id).mean(axis=1) for _, cls in items])
+            frac_s = np.vstack([running_mean(t, f, smooth_ns) for f in frac])
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                lo, hi, mean = np.nanmin(frac_s, axis=0), np.nanmax(frac_s, axis=0), np.nanmean(frac_s, axis=0)
+            if len(items) > 1:
+                axt.fill_between(t, lo, hi, color=color_of(ff), alpha=0.18, lw=0)
+            axt.plot(t, mean, color=color_of(ff), lw=1.5)
+            # per-residue probability over the window, mean over replicas
+            probs = []
+            for tt, cls in items:
+                sel = cls[tt >= skip_ns] if np.any(tt >= skip_ns) else cls
+                probs.append(100.0 * (sel == cls_id).mean(axis=0))
+            probs = np.vstack(probs)
+            res = np.arange(1, probs.shape[1] + 1)
+            if len(probs) > 1:
+                axr.fill_between(res, probs.min(axis=0), probs.max(axis=0), color=color_of(ff), alpha=0.15, lw=0)
+            axr.plot(res, probs.mean(axis=0), color=color_of(ff), lw=1.4, drawstyle="steps-mid")
+        if ss_input is not None:
+            res_in = np.arange(1, len(ss_input) + 1)
+            axr.fill_between(res_in, 0, np.where(ss_input == cls_id, 100, 0), step="mid",
+                             facecolor="none", edgecolor=SS_COLORS[cls_id], hatch="////", lw=0.6)
+            axt.axhline(100.0 * (ss_input == cls_id).mean(), color=SS_COLORS[cls_id], lw=0.8, ls="--")
+        axt.set_ylabel(f"{label} (% residues)")
+        axt.set_title(f"{label.capitalize()} content" + (" (dashed: input structure)" if ss_input is not None else ""),
+                      loc="left", color=INK)
+        axr.set_ylabel(f"P({label}) (%)")
+        axr.set_ylim(0, 105)
+        axr.set_title(f"Per-residue {label} probability after {skip_ns:g} ns"
+                      + (" (hatched: input structure)" if ss_input is not None else ""), loc="left", color=INK)
+    axes[1][0].set_xlabel("Time (ns)")
+    axes[1][1].set_xlabel("Residue")
+    ff_legend(axes[0][0], list(dssp), loc="lower right", ncol=2)
+    fig.suptitle(f"Secondary structure content (DSSP; {smooth_ns:g} ns running mean, replica mean with min-max band)",
+                 x=0.01, ha="left", fontsize=9, color=INK_2)
+    fig.tight_layout()
+    save(fig, fig_dir, "fig9_dssp_content", formats)
+
+
+def dssp_rows(dssp, ss_input, skip_ns, stats_rows):
+    """Per replica: percent of residues in helix, strand and coil over the
+    averaging window, and percent of residues keeping the class they have in
+    the input structure (ss_retained). Appended to stats_rows."""
+    for ff, items in dssp.items():
+        per_rep = {k: [] for k in ("ss_helix", "ss_strand", "ss_coil", "ss_retained")}
+        for i, (t, cls) in enumerate(items, start=1):
+            sel = cls[t >= skip_ns] if np.any(t >= skip_ns) else cls
+            vals = {
+                "ss_helix": 100.0 * (sel == 1).mean(axis=1),
+                "ss_strand": 100.0 * (sel == 2).mean(axis=1),
+                "ss_coil": 100.0 * (sel == 0).mean(axis=1),
+            }
+            if ss_input is not None and len(ss_input) == sel.shape[1]:
+                vals["ss_retained"] = 100.0 * (sel == ss_input[None, :]).mean(axis=1)
+            for key, y in vals.items():
+                per_rep[key].append(y.mean())
+                stats_rows.append({"observable": key, "force_field": ff, "replica": i,
+                                   "mean": y.mean(), "sd": y.std(ddof=1) if len(y) > 1 else np.nan,
+                                   "block_sem": block_sem(y), "n_frames": len(y)})
+        for key, means in per_rep.items():
+            if not means:
+                continue
+            means = np.array(means)
+            stats_rows.append({"observable": key, "force_field": ff, "replica": "all",
+                               "mean": means.mean(), "sd": means.std(ddof=1) if len(means) > 1 else np.nan,
+                               "block_sem": np.nan, "n_frames": len(means)})
 
 
 # -----------------------------------------------------------------------------
@@ -823,7 +1010,12 @@ def main():
                     "fig5_sasa_per_residue", args.fig_dir, args.formats)
     fig_quality(found, args.analysis_dir, args.fig_dir, args.formats)
     fig_replicas(found, args.skip_ns, args.smooth_ns, args.fig_dir, args.formats)
+    dssp = load_dssp(found)
+    ss_input = load_dssp_input(args.analysis_dir)
+    fig_dssp_maps(dssp, args.skip_ns, args.fig_dir, args.formats)
+    fig_dssp_content(dssp, ss_input, args.skip_ns, args.smooth_ns, args.fig_dir, args.formats)
     rmsf_rows(found, stats_rows)
+    dssp_rows(dssp, ss_input, args.skip_ns, stats_rows)
     write_summary(stats_rows, args.fig_dir / "summary_statistics.csv")
     write_table(stats_rows, found, args.reference, args.fig_dir / "summary_table.csv")
 

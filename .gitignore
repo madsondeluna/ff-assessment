@@ -1,6 +1,10 @@
 # Simulation and analysis outputs (large, regenerable)
 runs/
 analysis/
+logs/
+
+# Downloaded structures (get_structure.sh fetches them again)
+input/*.pdb
 
 # Force field ports downloaded by the user (licensing: redistribute only the
 # files you are allowed to; the CHARMM36 port is downloaded from the

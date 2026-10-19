@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 # 01_prepare.sh
-# Builds and equilibrates eIF4E in water with every force field in FF_LABELS
+# Builds and equilibrates the test protein (ubiquitin, 1UBQ, by default; see
+# PDB_ID / INPUT_PDB in config.sh) in water with every force field in FF_LABELS
 # (CHARMM36m, AMBER, GROMOS 53A6, GROMOS 54A7 by default):
 #   clean PDB -> pdb2gmx -> box -> solvate -> ions -> EM      (runs/<ff>/build)
 #   NVT (posres) -> NPT (posres) -> production .tpr           (runs/<ff>/repN)
@@ -20,6 +21,10 @@ check_gmx
 parse_ff_args "$@"
 FORCE="${FORCE:-0}"
 
+# Download and clean the structure if it is missing (PDB_ID in config.sh)
+if [[ ! -s "$INPUT_PDB" && -n "${PDB_ID:-}" ]]; then
+    bash "$REPO_ROOT/scripts/get_structure.sh"
+fi
 need_file "$INPUT_PDB"
 # Regenerate the .mdp files from config.sh every time (config.sh is the
 # single source of truth; edit it, not the .mdp files).
@@ -36,71 +41,10 @@ fi
 must_run() { [[ "$FORCE" == 1 || ! -s "$1" ]]; }
 
 # -----------------------------------------------------------------------------
-# 1. Clean the input structure (identical file for both force fields)
+# 1. Input structure: downloaded and cleaned by get_structure.sh when missing;
+#    cleaned again here (idempotent) so any user-provided PDB is handled.
+#    clean_pdb and check_gaps live in lib.sh.
 # -----------------------------------------------------------------------------
-# Keeps only standard amino acids of the selected chain(s), first alternate
-# location, renames protonation-specific residue names back to the generic
-# ones (HIS, CYS) so each force field assigns its own, converts MSE to MET,
-# and drops hydrogens (pdb2gmx -ignh rebuilds them for each force field).
-clean_pdb() {
-    local in=$1 out=$2
-    awk -v chains="$CHAIN" '
-    BEGIN {
-        n = split("ALA ARG ASN ASP CYS GLN GLU GLY HIS ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL", aa, " ")
-        for (i = 1; i <= n; i++) std[aa[i]] = 1
-        split("HID HIE HIP HSD HSE HSP HISA HISB HISH HISD HISE", h, " "); for (i in h) his[h[i]] = 1
-        split("CYX CYM CYS2", c, " "); for (i in c) cys[c[i]] = 1
-    }
-    /^(ATOM  |HETATM)/ {
-        res = substr($0, 18, 4); gsub(/ /, "", res)
-        if (res in his) res = "HIS"
-        if (res in cys) res = "CYS"
-        name = substr($0, 13, 4); gsub(/ /, "", name)
-        if (res == "MSE") { res = "MET"; if (name == "SE") name = "SD" }
-        if (!(res in std)) next
-        alt = substr($0, 17, 1); if (alt != " " && alt != "A") next
-        ch = substr($0, 22, 1); if (chains != "" && index(chains, ch) == 0) next
-        elem = substr($0, 77, 2); gsub(/ /, "", elem)
-        if (elem == "H" || elem == "D" || name ~ /^[0-9]*H/ || name ~ /^D/) next
-        line = $0
-        # rewrite record type, residue name (cols 18-20) and atom name if changed
-        line = "ATOM  " substr(line, 7)
-        line = substr(line, 1, 16) " " sprintf("%-3s", res) " " substr(line, 22)
-        if (name == "SD" && substr($0, 13, 4) ~ /SE/) line = substr(line, 1, 12) " SD " substr(line, 17)
-        print line
-        next
-    }
-    /^TER/ { print "TER"; next }
-    END { print "END" }
-    ' "$in" >"$out"
-    [[ $(grep -c '^ATOM' "$out") -gt 0 ]] || die "no protein atoms left after cleaning $in (check CHAIN='$CHAIN')"
-}
-
-# Detect chain breaks: consecutive CA atoms farther than 4.2 A apart.
-check_gaps() {
-    local pdb=$1 gaps
-    gaps=$(awk '
-        substr($0,13,4) == " CA " {
-            ch = substr($0,22,1); r = substr($0,23,4) + 0
-            x = substr($0,31,8); y = substr($0,39,8); z = substr($0,47,8)
-            if (ch == pch) {
-                d = sqrt((x-px)^2 + (y-py)^2 + (z-pz)^2)
-                if (d > 4.2) printf "  chain %s: residue %d -> %d (CA-CA %.1f A)\n", ch, pr, r, d
-            }
-            pch = ch; pr = r; px = x; py = y; pz = z
-        }' "$pdb")
-    if [[ -n "$gaps" ]]; then
-        if [[ "$ALLOW_GAPS" == 1 ]]; then
-            warn "chain breaks found (continuing because ALLOW_GAPS=1):"$'\n'"$gaps"
-        else
-            die "chain breaks (missing residues) found:
-$gaps
-  pdb2gmx would bond across these gaps. Model the missing residues
-  (MODELLER, PDBFixer, AlphaFold model) or trim the termini, then rerun.
-  Set ALLOW_GAPS=1 only if you know what you are doing."
-        fi
-    fi
-}
 
 # pdb2gmx histidine menu order is the same for every force field in
 # GROMACS: 0 = H on ND1, 1 = H on NE2, 2 = both.

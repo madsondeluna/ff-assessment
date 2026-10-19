@@ -1,10 +1,18 @@
 # ff-assessment
 
-Reproducible four-way comparison of the translation initiation factor eIF4E
-simulated in explicit water with two all-atom force fields (CHARMM36m and
-AMBER ff14SB) and two united-atom force fields (GROMOS 53A6 and GROMOS 54A7),
-using GROMACS 2023 or newer. Each force field is run in three independent
-replicas (12 production simulations of 100 ns by default).
+Reproducible four-way comparison of a small protein simulated in explicit
+water with two all-atom force fields (CHARMM36m and AMBER ff14SB) and two
+united-atom force fields (GROMOS 53A6 and GROMOS 54A7), using GROMACS 2023 or
+newer. Each force field is run in three independent replicas (12 production
+simulations of 100 ns by default), strictly one after the other, with a
+progress log.
+
+The default test protein is human ubiquitin (PDB 1UBQ, 76 residues, 1.8 A):
+one alpha helix, one 3-10 helix and a five-stranded mixed beta sheet, no
+gaps and no disulfides, which makes it a good small alpha/beta case for
+asking how each force field keeps (or loses) secondary structure. The
+structure is downloaded from the RCSB and cleaned automatically; any other
+entry can be used with `PDB_ID`, or any prepared structure with `INPUT_PDB`.
 
 The pipeline builds every system from the same input structure, runs the same
 protocol (energy minimization, 100 ps NVT, 100 ps NPT, 100 ns production),
@@ -14,7 +22,8 @@ of comparison, as in a multi-replica benchmark:
 - between replicas of the same force field (convergence, run-to-run spread);
 - between force fields (replica means with SD, pooled distributions, and
   "force field minus reference" panels, with CHARMM36m as the default
-  reference).
+  reference), including secondary structure per residue and time (DSSP:
+  helix dark blue, strand red, coil white).
 
 The repository started as a two-way CHARMM36m vs GROMOS 53A6 comparison
 (`charmmvsgromos`) and was extended to GROMOS 54A7 and AMBER; the old name
@@ -25,7 +34,7 @@ still redirects to this repository on GitHub.
 ```
 ff-assessment/
 ├── config.sh                    all parameters (single source of truth)
-├── input/                       place the eIF4E structure here (eif4e.pdb)
+├── input/                       downloaded and cleaned structure (1ubq.pdb)
 ├── forcefields/                 place downloaded force field ports here
 ├── mdp/
 │   ├── charmm36m/               ions, em, nvt, npt, md .mdp files
@@ -33,13 +42,17 @@ ff-assessment/
 │   ├── gromos53a6/              same files for GROMOS 53A6
 │   └── gromos54a7/              same files for GROMOS 54A7
 ├── scripts/
-│   ├── lib.sh                   shared bash helpers (force field table)
+│   ├── lib.sh                   shared bash helpers (force field table, PDB cleaning)
+│   ├── get_structure.sh         download PDB_ID from the RCSB and clean it
 │   ├── 00_make_mdps.sh          writes mdp/ from config.sh
 │   ├── 01_prepare.sh            build, ions, EM, NVT, NPT, production .tpr
-│   ├── 02_run_production.sh     production runs (resume from checkpoint)
-│   ├── 03_analysis.sh           RMSD, RMSF, Rg, H-bonds, SASA, mdmat, QC
-│   └── 04_plot_comparison.py    comparative figures and statistics
+│   ├── 02_run_production.sh     production runs, one at a time (resume from checkpoint)
+│   ├── 03_analysis.sh           RMSD, RMSF, Rg, H-bonds, SASA, mdmat, DSSP, QC
+│   ├── 04_plot_comparison.py    comparative figures and statistics
+│   ├── run_all.sh               the whole campaign in sequence, logged
+│   └── status.sh                progress table of every run
 ├── requirements.txt             Python dependencies (numpy, matplotlib; scipy optional)
+├── logs/                        pipeline and production logs (created, not tracked)
 ├── runs/                        simulations (created, not tracked)
 ├── analysis/                    analysis outputs (created, not tracked)
 └── figures/                     final figures, summary_statistics.csv, summary_table.csv
@@ -49,10 +62,10 @@ ff-assessment/
 
 | Software | Version | Notes |
 |---|---|---|
-| GROMACS | 2023 or newer | `gmx` or `gmx_mpi` (set `GMX`); 2026 or newer for the built-in AMBER ff14SB/ff19SB |
+| GROMACS | 2023 or newer | `gmx` or `gmx_mpi` (set `GMX`); native `gmx dssp`; 2026 or newer for the built-in AMBER ff14SB/ff19SB |
 | CHARMM36 GROMACS port | February 2026 release recommended | download separately, see below |
 | Python | 3.9 or newer | `pip install -r requirements.txt` |
-| bash, awk, sed | any recent | standard on Linux and macOS |
+| bash, awk, sed, curl or wget | any recent | standard on Linux and macOS |
 
 GROMOS 53A6 and GROMOS 54A7 are distributed with every GROMACS version and
 need no download.
@@ -108,20 +121,30 @@ model.
 ## Quick start
 
 ```bash
-# 1. input structure and CHARMM port
-cp /path/to/eif4e.pdb input/eif4e.pdb
+# 1. CHARMM port (the structure is downloaded automatically)
 tar -xzf charmm36-feb2026_cgenff-5.0.ff.tgz -C forcefields/
 
 # 2. load GROMACS (example for a module system)
 module load gromacs
 
-# 3. build and equilibrate the four systems, three replicas each
+# 3. everything, in sequence, detached, with a log
+nohup bash scripts/run_all.sh > /dev/null 2>&1 &
+
+# 4. follow the campaign
+tail -f logs/pipeline_latest.log      # every line of every stage
+bash scripts/status.sh                # one line per run: stage, ns done, %, ns/day
+```
+
+`run_all.sh` chains `get_structure.sh` (download and clean 1UBQ),
+`01_prepare.sh` (four systems, three replicas each), `02_run_production.sh`
+(12 runs), `03_analysis.sh` and `04_plot_comparison.py`; each stage starts
+only when the previous one has finished, and rerunning the script skips what
+is already done. The stages can also be run one by one:
+
+```bash
+bash scripts/get_structure.sh          # input/1ubq.pdb (and 1ubq_raw.pdb)
 bash scripts/01_prepare.sh
-
-# 4. production, 12 runs in sequence (rerun the same command to resume)
-nohup bash scripts/02_run_production.sh > production.log 2>&1 &
-
-# 5. analyses and figures
+nohup bash scripts/02_run_production.sh > logs/production_stdout.log 2>&1 &
 bash scripts/03_analysis.sh
 python3 scripts/04_plot_comparison.py
 ```
@@ -132,18 +155,35 @@ selects replicas, so the production runs can be split into separate jobs. For
 queue time limits use `MAXH=23.5 bash scripts/02_run_production.sh charmm36m`;
 mdrun stops cleanly and the next call continues from the checkpoint.
 
+### Sequential execution and logs
+
+Production runs are strictly sequential: `02_run_production.sh` starts the
+next `mdrun` only when the previous one has finished (or stopped at `MAXH`),
+so one simulation has all threads and the GPU to itself. `RUN_ORDER=replica`
+(default) runs replica 1 of every force field first, then replica 2 and 3,
+so that a one-replica comparison is available after the first four runs;
+`RUN_ORDER=forcefield` finishes one force field before starting the next.
+
+| Log | Content |
+|---|---|
+| `logs/pipeline_<timestamp>.log` (`pipeline_latest.log` links to the newest) | everything printed by `run_all.sh` and the stages it calls |
+| `logs/production.log` | one line per run start, resume and finish, with wall time and ns/day |
+| `runs/<ff>/rep<N>/md_stdout.log`, `md.log` | mdrun output of each run |
+| `bash scripts/status.sh` | table: build and equilibration state, production state (running, stopped, finished), ns done, percent, ns/day, analysis up to date or stale |
+
 Any variable in `config.sh` can be overridden on the command line:
 
 ```bash
 NT=9 MDRUN_FLAGS="-nb gpu -pme gpu -bonded gpu" bash scripts/02_run_production.sh
 AMBER_FF=amber19sb AMBER_WATER=opc bash scripts/01_prepare.sh amber
 AMBER_FF=amber99sb-ildn bash scripts/01_prepare.sh amber      # GROMACS < 2026
+PDB_ID=1PGA INPUT_PDB=input/1pga.pdb bash scripts/run_all.sh   # another protein
+PROD_NS=5 N_REPLICAS=1 bash scripts/run_all.sh                # smoke test
 ```
 
-On a single workstation the runs are sequential on purpose: one mdrun with
-all threads is faster than three competing ones. With one GPU and 100 ns per
-run, the 12 production runs of a protein the size of eIF4E (around 50 000
-atoms with the 1.2 nm box) take on the order of days; the united-atom
+Ubiquitin in a 1.2 nm dodecahedron is a small system (around 20 000 atoms
+all-atom, fewer united-atom), so with one GPU each 100 ns run takes hours
+rather than days and the 12 runs complete in a few days; the united-atom
 systems are the fastest.
 
 ## Configuration
@@ -152,7 +192,8 @@ The most relevant variables in `config.sh`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `INPUT_PDB` | `input/eif4e.pdb` | input structure |
+| `PDB_ID` | `1UBQ` | entry downloaded and cleaned when `INPUT_PDB` is missing (empty disables) |
+| `INPUT_PDB` | `input/1ubq.pdb` | input structure |
 | `CHAIN` | `A` | chain(s) to keep; empty string keeps all |
 | `HIS_STATES` | `auto` | histidine protonation, one letter per HIS: `D` (ND1), `E` (NE2), `P` (both) |
 | `ALLOW_GAPS` | `0` | stop when missing residues are detected |
@@ -166,7 +207,9 @@ The most relevant variables in `config.sh`:
 | `PROD_NS` | `100` | production length (ns) |
 | `XTC_PS` | `10` | frame interval (ps) |
 | `N_REPLICAS` | `3` | independent replicas per force field |
+| `RUN_ORDER` | `replica` | sequence of the production runs (`replica` or `forcefield`) |
 | `SKIP_NS` | `10` | initial time excluded from averages |
+| `DSSP_DT_PS` | `100` | frame interval for the DSSP assignment (ps) |
 | `NT` | cores minus one | OpenMP threads for mdrun |
 
 The `.mdp` files in `mdp/` are regenerated from `config.sh` every time
@@ -243,6 +286,7 @@ protein centred, compact cell), then computes, for every replica:
 | SASA, native | `gmx sasa` | all protein atoms of each model | no, reported for reference only |
 | SASA per residue | `gmx sasa -or` | protein without H | yes |
 | Contact map | `gmx mdmat` | protein without H | yes |
+| Secondary structure | `gmx dssp -hmode dssp` | backbone N, CA, C, O | yes (amide H rebuilt from the backbone geometry) |
 | Quality checks | `gmx energy` | EM, NVT, NPT, production | n/a |
 
 Hydrogen bonds use the GROMACS geometric criterion (donor-acceptor distance
@@ -257,6 +301,16 @@ carbon and the apolar surface is underestimated. Likewise, explicit hydrogens
 shorten residue-residue minimum distances in CHARMM and AMBER. Removing
 hydrogens from every model gives the same atom set with the same radii.
 
+Secondary structure: `gmx dssp` (native since GROMACS 2023) assigns the
+eight DSSP states per residue and frame. `-hmode dssp` rebuilds the amide
+hydrogen from the C and O of the previous residue, as the original DSSP
+does, so the assignment uses the same backbone geometry rule for every force
+field instead of each model's own hydrogen positions. The plot script reduces
+the states to three classes, as usual in force field benchmarks: helix (H,
+G, I), strand (E, B) and coil (T, S, P, loop). The input structure is
+assigned with the same tool and used as the reference for the per-residue
+panels and for `ss_retained`.
+
 ## Outputs
 
 `figures/` (PNG and PDF):
@@ -270,11 +324,15 @@ hydrogens from every model gives the same atom set with the same radii.
 | `fig5_sasa_per_residue` | heavy-atom SASA per residue and differences vs the reference |
 | `fig6_quality_checks` | EM potential, NVT temperature, NPT pressure and density, production (line style: replica) |
 | `fig7_replicas` | one row per force field, each replica as its own line: RMSD, Rg, H-bonds, SASA, RMSF |
+| `fig8_dssp_maps` | secondary structure per residue (y) and time (x), one panel per replica, rows per force field; helix dark blue, strand red, coil white |
+| `fig9_dssp_content` | helix and strand content vs time (replica mean, min-max band, input structure as dashed line) and per-residue helix and strand probability over the averaging window against the input structure (hatched) |
 | `summary_statistics.csv` | mean, SD and block-averaged SEM per observable, replica and force field |
 | `summary_table.csv` | one row per force field and observable: mean, SD over replicas, difference vs reference, Welch's t-test |
 
 `summary_table.csv` is the table to report (mean plus or minus SD of the
-three replica means for RMSD, Rg, mean RMSF, H-bonds and SASA), and the
+three replica means for RMSD, Rg, mean RMSF, H-bonds, SASA, percent of
+residues in helix, strand and coil, and `ss_retained`, the percent of
+residues that keep the class they have in the input structure), and the
 console prints it at the end of the plot script. `--reference` changes the
 reference force field and `--only` restricts the figures to a subset of
 labels.
@@ -297,22 +355,32 @@ labels.
   CHARMM36m vs AMBER compares two all-atom families; all-atom vs GROMOS
   compares resolutions. Keep these three contrasts separate when reading the
   difference panels.
+- Secondary structure is where the families are expected to differ most:
+  53A6 is known to under-stabilize helices (the reason for 54A7), and the
+  all-atom families differ in helix propensity. `fig8_dssp_maps` shows
+  whether a loss is a transient fraying of the termini of a helix or strand
+  or a permanent unfolding, and whether it happens in every replica;
+  `ss_retained` summarizes it per run.
 - Histidine protonation and net charge are cross-checked after `pdb2gmx` for
   every force field against the first one built; the script warns if they
   differ. Set `HIS_STATES` to fix them explicitly.
-- Crystal structures of eIF4E usually lack the flexible N-terminal region.
-  Internal gaps stop the preparation (model them first); a truncated terminus
-  is accepted and receives charged termini in every force field.
-- Disk use is on the order of 1 to 2 GB per 100 ns replica (12 to 24 GB for
-  the full comparison), dominated by the full-system trajectory needed for
-  protein-water H-bonds.
+- 1UBQ is complete (residues 1 to 76); its C-terminal tail (72 to 76) is
+  flexible and dominates the RMSF. For another entry, internal gaps stop the
+  preparation (model them first); a truncated terminus is accepted and
+  receives charged termini in every force field.
+- Disk use is below 1 GB per 100 ns replica for ubiquitin (around 20 000
+  atoms, a frame every 10 ps), dominated by the full-system trajectory
+  needed for protein-water H-bonds.
 
 ## Migrating from the two-force-field version
 
 The label `charmm36` was renamed `charmm36m`. Existing runs can be kept with
 `mv runs/charmm36 runs/charmm36m && mv analysis/charmm36 analysis/charmm36m`;
 the default number of replicas changed from 1 to 3, so `01_prepare.sh` will
-add `rep2` and `rep3` next to an existing `rep1` without touching it.
+add `rep2` and `rep3` next to an existing `rep1` without touching it. The
+default protein changed from eIF4E to ubiquitin; to keep eIF4E, set
+`PDB_ID=""` and `INPUT_PDB=input/eif4e.pdb`. Existing analyses lack
+`dssp.dat`; `FORCE=1 bash scripts/03_analysis.sh` recomputes them.
 
 ## References
 
@@ -337,6 +405,11 @@ add `rep2` and `rep3` next to an existing `rep1` without touching it.
 - Lemkul J. A. From proteins to perturbed Hamiltonians: a suite of tutorials
   for the GROMACS-2018 molecular simulation package. Living J. Comput. Mol.
   Sci. 1, 5068 (2018).
+- Kabsch W., Sander C. Dictionary of protein secondary structure: pattern
+  recognition of hydrogen-bonded and geometrical features. Biopolymers 22,
+  2577-2637 (1983).
+- Vijay-Kumar S., Bugg C. E., Cook W. J. Structure of ubiquitin refined at
+  1.8 A resolution. J. Mol. Biol. 194, 531-544 (1987).
 
 ## Author
 

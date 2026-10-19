@@ -4,7 +4,8 @@
 # Trajectory analyses for every force field and replica:
 #   RMSD (backbone), RMSF (C-alpha), radius of gyration, intramolecular
 #   H-bonds, protein-water H-bonds, SASA, residue contact map (gmx mdmat),
-#   plus equilibration quality checks (EM, NVT, NPT, production energies).
+#   secondary structure per residue and frame (gmx dssp), plus equilibration
+#   quality checks (EM, NVT, NPT, production energies).
 # Results: analysis/<ff>/rep<N>/*.xvg|*.xpm  (plots: 04_plot_comparison.py)
 #
 # Comparability between the all-atom models (CHARMM36m, AMBER) and the
@@ -90,9 +91,10 @@ analyse_replica() {
         warn "[$ff rep$r] trajectory ends at ${tlast} ps, shorter than SKIP_NS=${SKIP_NS} ns; averages use the whole run"
         skip_ps=0
     fi
-    printf 'force_field=%s\ndisplay_name=%s\nff_dir=%s\nwater=%s\nfamily=%s\nreplica=%s\ngromacs=%s\nlast_time_ps=%s\nskip_ps=%s\nmdmat_cutoff_nm=%s\n' \
+    local dssp_dt="$DSSP_DT_PS"; [[ "$dssp_dt" == 0 ]] && dssp_dt="$XTC_PS"
+    printf 'force_field=%s\ndisplay_name=%s\nff_dir=%s\nwater=%s\nfamily=%s\nreplica=%s\ngromacs=%s\nlast_time_ps=%s\nskip_ps=%s\nmdmat_cutoff_nm=%s\ndssp_dt_ps=%s\n' \
         "$ff" "$(ff_display_name "$ff")" "$(ff_dir_name "$ff")" "$(ff_water "$ff")" "$(ff_family "$ff")" \
-        "$r" "$GMX_VERSION" "$tlast" "$skip_ps" "$MDMAT_CUTOFF" >"$A/meta.txt"
+        "$r" "$GMX_VERSION" "$tlast" "$skip_ps" "$MDMAT_CUTOFF" "$dssp_dt" >"$A/meta.txt"
     log "[$ff rep$r] trajectory length ${tlast} ps; averages from ${skip_ps} ps"
 
     local tpr="$R/md.tpr" ndx="$A/index.ndx" trj="$A/md_center.xtc"
@@ -196,6 +198,25 @@ analyse_replica() {
         [[ "$MDMAT_DT_PS" != 0 ]] && dtm="-dt $MDMAT_DT_PS"
         gmx_run_input "$L" "Protein_heavy\n" mdmat -s "$tpr" -f "$trj" -n "$ndx" \
             -b "$skip_ps" $dtm -t "$MDMAT_CUTOFF" -nlevels 100 -mean "$A/mdmat_mean.xpm" -no "$A/mdmat_ncontacts.xvg"
+    fi
+
+    # ---- Secondary structure (gmx dssp, native since GROMACS 2023) ----------
+    # -hmode dssp rebuilds the amide hydrogen from the backbone geometry, as
+    # the original DSSP does, so the assignment does not depend on how each
+    # force field places its explicit hydrogens (all-atom vs united-atom).
+    # One line of letters per frame (H/G/I helices, E/B strands, T/S/P/~
+    # others); 04_plot_comparison.py reduces them to helix / strand / coil.
+    if must_run "$A/dssp.dat"; then
+        log "[$ff rep$r] DSSP"
+        local dtd=""
+        [[ "$DSSP_DT_PS" != 0 ]] && dtd="-dt $DSSP_DT_PS"
+        gmx_run "$L" dssp -s "$tpr" -f "$trj" -n "$ndx" -sel 'group "Protein"' \
+            -hmode dssp -o "$A/dssp.dat" $dtd
+    fi
+    # Reference assignment of the input (crystal) structure, once per analysis
+    if [[ ! -s "$ANA_DIR/dssp_input.dat" && -s "$B/protein_clean.pdb" ]]; then
+        gmx_run "$L" dssp -s "$B/protein_clean.pdb" -f "$B/protein_clean.pdb" \
+            -sel 'group "Protein"' -hmode dssp -o "$ANA_DIR/dssp_input.dat"
     fi
 
     # ---- Equilibration and production quality checks ------------------------
