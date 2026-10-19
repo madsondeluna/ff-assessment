@@ -1,4 +1,4 @@
-# charmmvsgromos
+# ff-assessment
 
 Reproducible four-way comparison of the translation initiation factor eIF4E
 simulated in explicit water with two all-atom force fields (CHARMM36m and
@@ -16,13 +16,14 @@ of comparison, as in a multi-replica benchmark:
   "force field minus reference" panels, with CHARMM36m as the default
   reference).
 
-The repository name is historical: it started as a CHARMM36m vs GROMOS 53A6
-comparison and was extended to GROMOS 54A7 and AMBER.
+The repository started as a two-way CHARMM36m vs GROMOS 53A6 comparison
+(`charmmvsgromos`) and was extended to GROMOS 54A7 and AMBER; the old name
+still redirects to this repository on GitHub.
 
 ## Repository layout
 
 ```
-charmmvsgromos/
+ff-assessment/
 ├── config.sh                    all parameters (single source of truth)
 ├── input/                       place the eIF4E structure here (eif4e.pdb)
 ├── forcefields/                 place downloaded force field ports here
