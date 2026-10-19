@@ -1,0 +1,44 @@
+; npt.mdp (amber, family amber) - 100 ps NPT, heavy-atom position restraints
+define                   = -DPOSRES
+integrator               = md
+dt                       = 0.002
+nsteps                   = 50000
+; Output
+nstxout                  = 500
+nstvout                  = 500
+nstenergy                = 500
+nstlog                   = 500
+; Temperature coupling
+tcoupl                   = V-rescale
+tc-grps                  = Protein Non-Protein
+tau-t                    = 0.1 0.1
+ref-t                    = 300 300
+; Pressure coupling
+pcoupl                   = C-rescale
+pcoupltype               = isotropic
+tau-p                    = 2.0       ; ps
+ref-p                    = 1.0
+compressibility          = 4.5e-5    ; bar^-1, water
+refcoord-scaling         = com
+; Continuation from NVT
+continuation             = yes
+gen-vel                  = no
+pbc                      = xyz
+; --- Constraints: AMBER (bonds to hydrogen, as SHAKE in Amber) ---------------
+constraints              = h-bonds
+constraint-algorithm     = lincs
+lincs-iter               = 1
+lincs-order              = 4
+; --- Nonbonded: AMBER recommended settings in GROMACS -------------------------
+; AMBER protein force fields were parametrized with an 8-10 A real-space
+; cutoff plus PME and an analytical long-range dispersion correction.
+cutoff-scheme            = Verlet
+nstlist                  = 10        ; adjusted automatically by mdrun
+coulombtype              = PME
+rcoulomb                 = 1.0       ; nm
+vdwtype                  = Cut-off
+vdw-modifier             = Potential-shift
+rvdw                     = 1.0       ; nm
+DispCorr                 = EnerPres  ; long-range dispersion correction
+pme-order                = 4
+fourierspacing           = 0.16      ; nm

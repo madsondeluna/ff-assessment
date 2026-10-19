@@ -5,11 +5,15 @@
 # Rerunning this script continues from md.cpt, so an interrupted 100 ns run
 # picks up where it stopped.
 #
+# Runs are sequential (one mdrun at a time, all threads): on a single
+# workstation this is faster than running replicas side by side.
+#
 # Usage:
 #   bash scripts/02_run_production.sh                 # all force fields, all replicas
-#   bash scripts/02_run_production.sh charmm36        # one force field
+#   bash scripts/02_run_production.sh charmm36m       # one force field
 #   REPS="2 3" bash scripts/02_run_production.sh      # selected replicas
 #   MAXH=23.5 bash scripts/02_run_production.sh       # stop cleanly before a queue limit
+#   nohup bash scripts/02_run_production.sh > production.log 2>&1 &   # detached
 # =============================================================================
 
 source "$(dirname "$0")/lib.sh"
@@ -39,7 +43,7 @@ for ff in "${SELECTED_FF[@]}"; do
         maxh=""
         [[ -n "$MAXH" ]] && maxh="-maxh $MAXH"
 
-        log "[$ff rep$r] production started"
+        log "[$ff rep$r] production started ($(ff_display_name "$ff"), ${PROD_NS} ns)"
         ( cd "$R" && gmx_run "$REPO_ROOT/$R/md_stdout.log" mdrun -deffnm md $cpi $maxh \
             $THREAD_FLAGS $MDRUN_FLAGS )
 

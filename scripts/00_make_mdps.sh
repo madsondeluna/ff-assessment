@@ -1,25 +1,34 @@
 #!/usr/bin/env bash
 # =============================================================================
 # 00_make_mdps.sh
-# Writes the .mdp files for both force fields into mdp/<label>/.
+# Writes the .mdp files for every force field label into mdp/<label>/.
 #
 # Design of the comparison
 #   The protocol follows the standard lysozyme-in-water workflow
 #   (ions -> EM -> NVT 100 ps -> NPT 100 ps -> production), and every
-#   protocol parameter is IDENTICAL for both force fields: integrator, time
+#   protocol parameter is IDENTICAL for all force fields: integrator, time
 #   step, thermostat, barostat, coupling groups, restraints, output, seeds.
 #
-#   Only two blocks follow each force field's own parametrization, because
-#   using one force field's settings on the other is a known source of
+#   Only two blocks follow each force field family's own parametrization,
+#   because using one family's settings on another is a known source of
 #   artefacts and would confound the comparison:
 #     1. Nonbonded interactions (cutoffs, vdW modifier, dispersion correction)
 #     2. Bond constraints
 #
-#   CHARMM36/36m : PME, rc = 1.2 nm, LJ force-switch 1.0-1.2 nm, no DispCorr,
-#                  H-bond constraints (as in the CHARMM-GUI/MacKerell inputs).
-#   GROMOS 53A6  : PME, rc = 1.4 nm (the GROMOS parametrization cutoff),
-#                  plain LJ cutoff, DispCorr EnerPres, all bonds constrained
-#                  (GROMOS was parametrized with rigid bonds).
+#   charmm (CHARMM36m)        PME, rc = 1.2 nm, LJ force-switch 1.0-1.2 nm,
+#                             no DispCorr, H-bond constraints (CHARMM-GUI /
+#                             MacKerell lab inputs).
+#   amber  (ff14SB, ff19SB,   PME, rc = 1.0 nm, plain LJ cutoff with
+#           ff99SB-ILDN)      potential shift, DispCorr EnerPres (AMBER was
+#                             parametrized with an 8-10 A cutoff plus a
+#                             long-range dispersion correction), H-bond
+#                             constraints (SHAKE on bonds to H in Amber).
+#   gromos (53A6, 54A7)       PME, rc = 1.4 nm (the GROMOS parametrization
+#                             cutoff), plain LJ cutoff, DispCorr EnerPres,
+#                             all bonds constrained (GROMOS was parametrized
+#                             with rigid bonds). 53A6 and 54A7 share these
+#                             settings: 54A7 only changed parameters
+#                             (backbone dihedrals, charged side chains).
 #
 # Usage: bash scripts/00_make_mdps.sh
 # =============================================================================
@@ -35,11 +44,11 @@ EDR_STEPS=$(fcalc "$EDR_PS / $DT")
 EQ_OUT_STEPS=$(fcalc "1.0 / $DT")          # 1 ps output during equilibration
 
 # -----------------------------------------------------------------------------
-# Force-field-specific blocks
+# Family-specific blocks
 # -----------------------------------------------------------------------------
 nonbonded_block() {
-    case "$1" in
-        charmm36) cat <<'EOF'
+    case "$(ff_family "$1")" in
+        charmm) cat <<'EOF'
 ; --- Nonbonded: CHARMM36 / CHARMM36m recommended settings ---------------------
 cutoff-scheme            = Verlet
 nstlist                  = 10        ; adjusted automatically by mdrun
@@ -54,11 +63,27 @@ pme-order                = 4
 fourierspacing           = 0.16      ; nm
 EOF
         ;;
-        gromos53a6) cat <<'EOF'
-; --- Nonbonded: GROMOS 53A6 recommended settings (Verlet scheme) -------------
+        amber) cat <<'EOF'
+; --- Nonbonded: AMBER recommended settings in GROMACS -------------------------
+; AMBER protein force fields were parametrized with an 8-10 A real-space
+; cutoff plus PME and an analytical long-range dispersion correction.
+cutoff-scheme            = Verlet
+nstlist                  = 10        ; adjusted automatically by mdrun
+coulombtype              = PME
+rcoulomb                 = 1.0       ; nm
+vdwtype                  = Cut-off
+vdw-modifier             = Potential-shift
+rvdw                     = 1.0       ; nm
+DispCorr                 = EnerPres  ; long-range dispersion correction
+pme-order                = 4
+fourierspacing           = 0.16      ; nm
+EOF
+        ;;
+        gromos) cat <<'EOF'
+; --- Nonbonded: GROMOS 53A6 / 54A7 recommended settings (Verlet scheme) -----
 ; GROMOS was parametrized with a 1.4 nm cutoff (twin-range + reaction field).
 ; Here PME replaces the reaction field so that long-range electrostatics are
-; treated identically in both force fields; the LJ cutoff stays at 1.4 nm.
+; treated identically in all force fields; the LJ cutoff stays at 1.4 nm.
 cutoff-scheme            = Verlet
 nstlist                  = 10        ; adjusted automatically by mdrun
 coulombtype              = PME
@@ -75,8 +100,8 @@ EOF
 }
 
 constraints_block() {
-    case "$1" in
-        charmm36) cat <<'EOF'
+    case "$(ff_family "$1")" in
+        charmm) cat <<'EOF'
 ; --- Constraints: CHARMM36 (bonds to hydrogen) ------------------------------
 constraints              = h-bonds
 constraint-algorithm     = lincs
@@ -84,8 +109,16 @@ lincs-iter               = 1
 lincs-order              = 4
 EOF
         ;;
-        gromos53a6) cat <<'EOF'
-; --- Constraints: GROMOS 53A6 (all bonds, as in its parametrization) ---------
+        amber) cat <<'EOF'
+; --- Constraints: AMBER (bonds to hydrogen, as SHAKE in Amber) ---------------
+constraints              = h-bonds
+constraint-algorithm     = lincs
+lincs-iter               = 1
+lincs-order              = 4
+EOF
+        ;;
+        gromos) cat <<'EOF'
+; --- Constraints: GROMOS (all bonds, as in its parametrization) --------------
 constraints              = all-bonds
 constraint-algorithm     = lincs
 lincs-iter               = 1
@@ -96,10 +129,11 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# Protocol blocks (identical for both force fields)
+# Protocol blocks (identical for every force field)
 # -----------------------------------------------------------------------------
 write_mdps() {
-    local label=$1 out="$MDP_DIR/$1"
+    local label=$1 out="$MDP_DIR/$1" family
+    family=$(ff_family "$label")
     mkdir -p "$out"
 
     # ---- ions.mdp: only used to build a .tpr for gmx genion ----------------
@@ -108,7 +142,7 @@ write_mdps() {
     # This .tpr is never simulated, so the electrostatics choice is irrelevant.
     {
         cat <<EOF
-; ions.mdp ($label) - input for gmx genion only, never run
+; ions.mdp ($label, family $family) - input for gmx genion only, never run
 integrator               = steep
 emtol                    = 1000.0
 emstep                   = 0.01
@@ -123,7 +157,7 @@ EOF
     # ---- em.mdp ------------------------------------------------------------
     {
         cat <<EOF
-; em.mdp ($label) - steepest descent energy minimization
+; em.mdp ($label, family $family) - steepest descent energy minimization
 integrator               = steep
 emtol                    = 1000.0    ; kJ/mol/nm, stop when Fmax < emtol
 emstep                   = 0.01      ; nm
@@ -136,7 +170,7 @@ EOF
     # ---- nvt.mdp -----------------------------------------------------------
     {
         cat <<EOF
-; nvt.mdp ($label) - ${NVT_PS} ps NVT, heavy-atom position restraints
+; nvt.mdp ($label, family $family) - ${NVT_PS} ps NVT, heavy-atom position restraints
 define                   = -DPOSRES
 integrator               = md        ; leap-frog
 dt                       = $DT
@@ -169,7 +203,7 @@ EOF
     # fluctuations and, unlike Parrinello-Rahman, robust far from equilibrium.
     {
         cat <<EOF
-; npt.mdp ($label) - ${NPT_PS} ps NPT, heavy-atom position restraints
+; npt.mdp ($label, family $family) - ${NPT_PS} ps NPT, heavy-atom position restraints
 define                   = -DPOSRES
 integrator               = md
 dt                       = $DT
@@ -203,7 +237,7 @@ EOF
     # ---- md.mdp ------------------------------------------------------------
     {
         cat <<EOF
-; md.mdp ($label) - ${PROD_NS} ns production, unrestrained
+; md.mdp ($label, family $family) - ${PROD_NS} ns production, unrestrained
 integrator               = md
 dt                       = $DT
 nsteps                   = $PROD_STEPS
@@ -244,4 +278,4 @@ for ff in "${FF_LABELS[@]}"; do
     write_mdps "$ff"
 done
 
-log "production: ${PROD_NS} ns = ${PROD_STEPS} steps (dt = ${DT} ps), frames every ${XTC_PS} ps"
+log "production: ${PROD_NS} ns = ${PROD_STEPS} steps (dt = ${DT} ps), frames every ${XTC_PS} ps, ${N_REPLICAS} replica(s) per force field"

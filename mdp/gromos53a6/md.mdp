@@ -1,4 +1,4 @@
-; md.mdp (gromos53a6) - 100 ns production, unrestrained
+; md.mdp (gromos53a6, family gromos) - 100 ns production, unrestrained
 integrator               = md
 dt                       = 0.002
 nsteps                   = 50000000
@@ -27,15 +27,15 @@ compressibility          = 4.5e-5
 continuation             = yes
 gen-vel                  = no
 pbc                      = xyz
-; --- Constraints: GROMOS 53A6 (all bonds, as in its parametrization) ---------
+; --- Constraints: GROMOS (all bonds, as in its parametrization) --------------
 constraints              = all-bonds
 constraint-algorithm     = lincs
 lincs-iter               = 1
 lincs-order              = 4
-; --- Nonbonded: GROMOS 53A6 recommended settings (Verlet scheme) -------------
+; --- Nonbonded: GROMOS 53A6 / 54A7 recommended settings (Verlet scheme) -----
 ; GROMOS was parametrized with a 1.4 nm cutoff (twin-range + reaction field).
 ; Here PME replaces the reaction field so that long-range electrostatics are
-; treated identically in both force fields; the LJ cutoff stays at 1.4 nm.
+; treated identically in all force fields; the LJ cutoff stays at 1.4 nm.
 cutoff-scheme            = Verlet
 nstlist                  = 10        ; adjusted automatically by mdrun
 coulombtype              = PME

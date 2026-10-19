@@ -1,4 +1,4 @@
-; md.mdp (charmm36) - 100 ns production, unrestrained
+; md.mdp (gromos54a7, family gromos) - 100 ns production, unrestrained
 integrator               = md
 dt                       = 0.002
 nsteps                   = 50000000
@@ -27,20 +27,22 @@ compressibility          = 4.5e-5
 continuation             = yes
 gen-vel                  = no
 pbc                      = xyz
-; --- Constraints: CHARMM36 (bonds to hydrogen) ------------------------------
-constraints              = h-bonds
+; --- Constraints: GROMOS (all bonds, as in its parametrization) --------------
+constraints              = all-bonds
 constraint-algorithm     = lincs
 lincs-iter               = 1
 lincs-order              = 4
-; --- Nonbonded: CHARMM36 / CHARMM36m recommended settings ---------------------
+; --- Nonbonded: GROMOS 53A6 / 54A7 recommended settings (Verlet scheme) -----
+; GROMOS was parametrized with a 1.4 nm cutoff (twin-range + reaction field).
+; Here PME replaces the reaction field so that long-range electrostatics are
+; treated identically in all force fields; the LJ cutoff stays at 1.4 nm.
 cutoff-scheme            = Verlet
 nstlist                  = 10        ; adjusted automatically by mdrun
 coulombtype              = PME
-rcoulomb                 = 1.2       ; nm
+rcoulomb                 = 1.4       ; nm
 vdwtype                  = Cut-off
-vdw-modifier             = Force-switch
-rvdw-switch              = 1.0       ; nm, LJ forces smoothly switched to zero
-rvdw                     = 1.2       ; nm
-DispCorr                 = no        ; CHARMM36 was parametrized without it
+vdw-modifier             = Potential-shift
+rvdw                     = 1.4       ; nm
+DispCorr                 = EnerPres  ; long-range dispersion correction
 pme-order                = 4
 fourierspacing           = 0.16      ; nm

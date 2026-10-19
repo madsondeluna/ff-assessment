@@ -1,0 +1,42 @@
+; nvt.mdp (gromos54a7, family gromos) - 100 ps NVT, heavy-atom position restraints
+define                   = -DPOSRES
+integrator               = md        ; leap-frog
+dt                       = 0.002
+nsteps                   = 50000
+; Output
+nstxout                  = 500
+nstvout                  = 500
+nstenergy                = 500
+nstlog                   = 500
+; Temperature coupling
+tcoupl                   = V-rescale
+tc-grps                  = Protein Non-Protein
+tau-t                    = 0.1 0.1   ; ps
+ref-t                    = 300 300
+; Pressure coupling
+pcoupl                   = no
+; Velocities
+continuation             = no
+gen-vel                  = yes
+gen-temp                 = 300
+gen-seed                 = @SEED@    ; replaced per replica by 01_prepare.sh
+pbc                      = xyz
+; --- Constraints: GROMOS (all bonds, as in its parametrization) --------------
+constraints              = all-bonds
+constraint-algorithm     = lincs
+lincs-iter               = 1
+lincs-order              = 4
+; --- Nonbonded: GROMOS 53A6 / 54A7 recommended settings (Verlet scheme) -----
+; GROMOS was parametrized with a 1.4 nm cutoff (twin-range + reaction field).
+; Here PME replaces the reaction field so that long-range electrostatics are
+; treated identically in all force fields; the LJ cutoff stays at 1.4 nm.
+cutoff-scheme            = Verlet
+nstlist                  = 10        ; adjusted automatically by mdrun
+coulombtype              = PME
+rcoulomb                 = 1.4       ; nm
+vdwtype                  = Cut-off
+vdw-modifier             = Potential-shift
+rvdw                     = 1.4       ; nm
+DispCorr                 = EnerPres  ; long-range dispersion correction
+pme-order                = 4
+fourierspacing           = 0.16      ; nm

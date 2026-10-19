@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # =============================================================================
 # config.sh
-# Central configuration for the CHARMM36 vs GROMOS 53A6 comparison.
+# Central configuration for the four-way force field comparison of eIF4E:
+#   CHARMM36m | AMBER (ff14SB by default) | GROMOS 53A6 | GROMOS 54A7
 # Every script in scripts/ sources this file. Any variable can be overridden
 # from the environment, e.g.:  PROD_NS=10 NT=8 bash scripts/01_prepare.sh
 # =============================================================================
@@ -9,7 +10,8 @@
 # -----------------------------------------------------------------------------
 # GROMACS executable and parallelism
 # -----------------------------------------------------------------------------
-# gmx, gmx_mpi, or a full path. Requires GROMACS >= 2023.
+# gmx, gmx_mpi, or a full path. Requires GROMACS >= 2023 (>= 2026 for the
+# built-in AMBER ff14SB / ff19SB ports, see below).
 GMX="${GMX:-gmx}"
 
 # OpenMP threads for mdrun. Default: all cores minus one (keeps one core free).
@@ -40,32 +42,59 @@ CHAIN="${CHAIN-A}"
 ALLOW_GAPS="${ALLOW_GAPS:-0}"
 
 # Histidine protonation. "auto" lets pdb2gmx decide from the H-bond network
-# (same algorithm for both force fields; the result is cross-checked).
+# (same algorithm for every force field; the result is cross-checked).
 # Otherwise give one letter per HIS, in sequence order:
-#   D = H on ND1 (HSD / HISA), E = H on NE2 (HSE / HISB), P = both (HSP / HISH)
+#   D = H on ND1 (HSD / HID / HISA), E = H on NE2 (HSE / HIE / HISB),
+#   P = both (HSP / HIP / HISH)
 # Example for three histidines: HIS_STATES="E D E"
 HIS_STATES="${HIS_STATES:-auto}"
 
 # -----------------------------------------------------------------------------
 # Force fields
 # -----------------------------------------------------------------------------
-# Labels used for directory names and plots. Do not change the labels; change
-# the force field directories below instead.
-FF_LABELS=(charmm36 gromos53a6)
+# Labels used for directory names (mdp/, runs/, analysis/) and plots. Each
+# label maps to a force field directory and a water model below; the
+# force-field family (charmm, amber, gromos) decides the nonbonded and
+# constraint settings written by scripts/00_make_mdps.sh.
+#
+# Remove a label from this list to skip that force field, or pass labels on
+# the command line:  bash scripts/01_prepare.sh charmm36m amber
+FF_LABELS=(charmm36m amber gromos53a6 gromos54a7)
 
-# CHARMM36 GROMACS port (MacKerell lab). Place the extracted directory in
+# Reference force field for the difference panels in 04_plot_comparison.py
+# (every other force field is plotted as "ff minus reference").
+FF_REFERENCE="${FF_REFERENCE:-charmm36m}"
+
+# --- CHARMM36m -------------------------------------------------------------
+# GROMACS port from the MacKerell lab. Place the extracted directory in
 # forcefields/ (e.g. forcefields/charmm36-feb2026_cgenff-5.0.ff) and give the
-# name WITHOUT the .ff suffix. The port contains the CHARMM36m protein
-# parameters by default.
+# name WITHOUT the .ff suffix. Current ports contain the CHARMM36m protein
+# parameters (the 'm' revision of the backbone CMAP) by default.
 CHARMM_FF="${CHARMM_FF:-charmm36-feb2026_cgenff-5.0}"
 CHARMM_WATER="${CHARMM_WATER:-tip3p}"      # CHARMM-modified TIP3P (LJ on H)
 
-# GROMOS 53A6 ships with GROMACS.
-GROMOS_FF="${GROMOS_FF:-gromos53a6}"
-GROMOS_WATER="${GROMOS_WATER:-spc}"        # GROMOS was parametrized with SPC
+# --- AMBER -------------------------------------------------------------------
+# Which AMBER protein force field the label "amber" refers to:
+#   amber14sb      ff14SB, TIP3P. Built into GROMACS >= 2026 (validation
+#                  pending per the release notes). Default: the usual
+#                  reference AMBER force field and a 3-site water like the
+#                  other three systems.
+#   amber19sb      ff19SB with OPC (4-site water, per-residue CMAP). Built
+#                  into GROMACS >= 2026; requires AMBER_WATER=opc (or opc3).
+#   amber99sb-ildn ships with every GROMACS version; use it when GROMACS
+#                  < 2026 is the only option (AMBER_WATER=tip3p).
+# A user-contributed port can be extracted into forcefields/ and named here
+# the same way as the CHARMM port.
+AMBER_FF="${AMBER_FF:-amber14sb}"
+AMBER_WATER="${AMBER_WATER:-tip3p}"        # standard TIP3P (no LJ on H)
+
+# --- GROMOS 53A6 and 54A7 (ship with GROMACS) ----------------------------------
+GROMOS53_FF="${GROMOS53_FF:-gromos53a6}"
+GROMOS54_FF="${GROMOS54_FF:-gromos54a7}"
+GROMOS_WATER="${GROMOS_WATER:-spc}"        # both were parametrized with SPC
 
 # -----------------------------------------------------------------------------
-# System setup (identical for both force fields)
+# System setup (identical for every force field)
 # -----------------------------------------------------------------------------
 BOX_TYPE="${BOX_TYPE:-dodecahedron}"
 BOX_DIST="${BOX_DIST:-1.2}"         # nm, solute-box distance
@@ -74,8 +103,8 @@ TEMP="${TEMP:-300}"                 # K
 PRESSURE="${PRESSURE:-1.0}"         # bar
 
 # -----------------------------------------------------------------------------
-# Protocol (identical for both force fields; only nonbonded settings and
-# constraints follow each force field's parametrization, see 00_make_mdps.sh)
+# Protocol (identical for every force field; only nonbonded settings and
+# constraints follow each family's parametrization, see 00_make_mdps.sh)
 # -----------------------------------------------------------------------------
 DT="${DT:-0.002}"                   # ps
 EM_NSTEPS="${EM_NSTEPS:-50000}"
@@ -86,9 +115,10 @@ XTC_PS="${XTC_PS:-10}"              # ps between saved frames (production)
 EDR_PS="${EDR_PS:-10}"              # ps between energy frames (production)
 
 # Independent replicas per force field (different velocity seeds).
-# One replica answers "what happened in this run"; at least three are needed
-# to separate force field effects from run-to-run variability.
-N_REPLICAS="${N_REPLICAS:-1}"
+# One replica answers "what happened in this run"; three are the minimum to
+# separate force field effects from run-to-run variability, so the comparison
+# runs 3 x 4 = 12 production simulations by default.
+N_REPLICAS="${N_REPLICAS:-3}"
 SEED_BASE="${SEED_BASE:-2026}"      # replica r uses SEED_BASE + r
 
 # -----------------------------------------------------------------------------

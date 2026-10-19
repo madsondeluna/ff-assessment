@@ -85,19 +85,66 @@ gmx_share_top() {
 # -----------------------------------------------------------------------------
 # Force field metadata
 # -----------------------------------------------------------------------------
+# Every label known to the pipeline maps to: a family (decides the nonbonded
+# and constraint settings), a force field directory and a water model.
+ff_family() {
+    case "$1" in
+        charmm36m)  echo charmm ;;
+        amber)      echo amber ;;
+        gromos53a6) echo gromos ;;
+        gromos54a7) echo gromos ;;
+        *) die "unknown force field label '$1' (use: ${FF_LABELS[*]})" ;;
+    esac
+}
+
 ff_dir_name() {
     case "$1" in
-        charmm36)   echo "$CHARMM_FF" ;;
-        gromos53a6) echo "$GROMOS_FF" ;;
+        charmm36m)  echo "$CHARMM_FF" ;;
+        amber)      echo "$AMBER_FF" ;;
+        gromos53a6) echo "$GROMOS53_FF" ;;
+        gromos54a7) echo "$GROMOS54_FF" ;;
         *) die "unknown force field label '$1' (use: ${FF_LABELS[*]})" ;;
     esac
 }
 
 ff_water() {
     case "$1" in
-        charmm36)   echo "$CHARMM_WATER" ;;
-        gromos53a6) echo "$GROMOS_WATER" ;;
+        charmm36m)  echo "$CHARMM_WATER" ;;
+        amber)      echo "$AMBER_WATER" ;;
+        gromos53a6|gromos54a7) echo "$GROMOS_WATER" ;;
         *) die "unknown force field label '$1'" ;;
+    esac
+}
+
+# Human-readable name used in logs and figure legends (04_plot_comparison.py
+# reads it from analysis/<label>/rep<N>/meta.txt).
+ff_display_name() {
+    case "$1" in
+        charmm36m)  echo "CHARMM36m" ;;
+        gromos53a6) echo "GROMOS 53A6" ;;
+        gromos54a7) echo "GROMOS 54A7" ;;
+        amber)
+            case "$AMBER_FF" in
+                amber14sb*)      echo "AMBER ff14SB" ;;
+                amber19sb*)      echo "AMBER ff19SB" ;;
+                amber99sb-ildn*) echo "AMBER ff99SB-ILDN" ;;
+                amber99sb*)      echo "AMBER ff99SB" ;;
+                amber03*)        echo "AMBER ff03" ;;
+                *)               echo "AMBER ($AMBER_FF)" ;;
+            esac ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# Pre-equilibrated solvent box for gmx solvate. 3-site models use spc216.gro;
+# 4-site models (TIP4P, TIP4P-Ew, OPC) need tip4p.gro so that the virtual
+# site is present. gmx solvate only needs the geometry; the parameters come
+# from the water model chosen in pdb2gmx.
+ff_solvent_box() {
+    case "$(ff_water "$1")" in
+        tip4p*|opc)  echo tip4p.gro ;;
+        tip5p)       echo tip5p.gro ;;
+        *)           echo spc216.gro ;;
     esac
 }
 
@@ -116,16 +163,37 @@ ff_path() {
 require_ff() {
     local label=$1 path
     if ! path=$(ff_path "$label"); then
-        if [[ $label == charmm36 ]]; then
-            die "CHARMM36 port '$(ff_dir_name charmm36).ff' not found.
+        case "$label" in
+            charmm36m)
+                die "CHARMM36 port '$(ff_dir_name charmm36m).ff' not found.
   Download it from https://mackerell.umaryland.edu/charmm_ff.shtml#gromacs
   and extract it into $FF_DIR/, e.g.:
     tar -xzf charmm36-feb2026_cgenff-5.0.ff.tgz -C $FF_DIR/
-  or set CHARMM_FF in config.sh to the directory name you have."
-        fi
+  or set CHARMM_FF in config.sh to the directory name you have." ;;
+            amber)
+                die "AMBER force field '$(ff_dir_name amber).ff' not found (GROMACS $GMX_VERSION).
+  amber14sb and amber19sb are built into GROMACS >= 2026. With an older
+  GROMACS either extract a port into $FF_DIR/ and set AMBER_FF to its
+  directory name, or use the built-in ff99SB-ILDN:
+    AMBER_FF=amber99sb-ildn AMBER_WATER=tip3p bash scripts/01_prepare.sh amber" ;;
+        esac
         die "force field '$(ff_dir_name "$label").ff' not found"
     fi
     echo "$path"
+}
+
+# Consistency checks on the force field / water combination before building.
+check_ff_combo() {
+    local label=$1 water; water=$(ff_water "$label")
+    case "$(ff_dir_name "$label")" in
+        amber19sb*)
+            [[ $water == opc || $water == opc3 ]] ||
+                die "ff19SB was parametrized with OPC: set AMBER_WATER=opc (or opc3), not '$water'" ;;
+        amber14sb*|amber99*|amber03*)
+            [[ $water == opc* ]] &&
+                warn "[$label] $water with $(ff_dir_name "$label"): AMBER recommends TIP3P/TIP4P-Ew for this force field" ;;
+    esac
+    return 0
 }
 
 # grompp warnings tolerated per force field. GROMACS >= 2023 always emits one
@@ -142,17 +210,34 @@ ff_maxwarn() {
     esac
 }
 
-# Positive and negative ion molecule names defined by a force field.
-# Recent GROMACS ports use NA/CL; some older CHARMM ports use SOD/CLA.
+# Positive and negative ion molecule names for gmx genion.
+#   ff_ion_names <force field dir> [topol.top]
+# The ion .itp actually included by the topology is inspected first: the
+# built-in AMBER ff14SB/ff19SB ports (GROMACS >= 2026) ship ion parameters
+# per water model (ions_tip3p.itp, ions_opc.itp, ...), which pdb2gmx
+# includes according to the chosen water. Otherwise <ff>/ions.itp is used.
+# Recent ports use NA/CL; older CHARMM ports use SOD/CLA; some AMBER
+# conversions use Na+/Cl-.
 ff_ion_names() {
-    local ions="$1/ions.itp"
+    local ffpath=$1 top=${2:-} ions="" mols f
+    if [[ -n $top && -f $top ]]; then
+        f=$(grep -oE '#include +"[^"]*ions[^"]*\.itp"' "$top" | head -n 1 | grep -oE '"[^"]*"' | tr -d '"' || true)
+        if [[ -n $f ]]; then
+            if [[ -f "$ffpath/${f#*.ff/}" ]]; then ions="$ffpath/${f#*.ff/}"
+            elif [[ -f "$(dirname "$top")/$f" ]]; then ions="$(dirname "$top")/$f"
+            elif [[ -f "$(gmx_share_top)/$f" ]]; then ions="$(gmx_share_top)/$f"
+            fi
+        fi
+    fi
+    [[ -n $ions ]] || ions="$ffpath/ions.itp"
     [[ -f $ions ]] || { echo "NA CL"; return; }
-    local mols
     mols=$(awk '/^\[ *moleculetype *\]/{getline; while($0 ~ /^ *;/ || $0 ~ /^ *$/) getline; print $1}' "$ions")
     if grep -qx NA <<<"$mols" && grep -qx CL <<<"$mols"; then
         echo "NA CL"
     elif grep -qx SOD <<<"$mols" && grep -qx CLA <<<"$mols"; then
         echo "SOD CLA"
+    elif grep -qx 'Na+' <<<"$mols" && grep -qx 'Cl-' <<<"$mols"; then
+        echo "Na+ Cl-"
     else
         die "could not identify Na+/Cl- molecule names in $ions"
     fi

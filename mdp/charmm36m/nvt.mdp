@@ -1,4 +1,4 @@
-; nvt.mdp (charmm36) - 100 ps NVT, heavy-atom position restraints
+; nvt.mdp (charmm36m, family charmm) - 100 ps NVT, heavy-atom position restraints
 define                   = -DPOSRES
 integrator               = md        ; leap-frog
 dt                       = 0.002

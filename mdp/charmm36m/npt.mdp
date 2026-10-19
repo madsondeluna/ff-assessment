@@ -1,4 +1,4 @@
-; npt.mdp (charmm36) - 100 ps NPT, heavy-atom position restraints
+; npt.mdp (charmm36m, family charmm) - 100 ps NPT, heavy-atom position restraints
 define                   = -DPOSRES
 integrator               = md
 dt                       = 0.002

@@ -1,0 +1,19 @@
+; em.mdp (amber, family amber) - steepest descent energy minimization
+integrator               = steep
+emtol                    = 1000.0    ; kJ/mol/nm, stop when Fmax < emtol
+emstep                   = 0.01      ; nm
+nsteps                   = 50000
+pbc                      = xyz
+; --- Nonbonded: AMBER recommended settings in GROMACS -------------------------
+; AMBER protein force fields were parametrized with an 8-10 A real-space
+; cutoff plus PME and an analytical long-range dispersion correction.
+cutoff-scheme            = Verlet
+nstlist                  = 10        ; adjusted automatically by mdrun
+coulombtype              = PME
+rcoulomb                 = 1.0       ; nm
+vdwtype                  = Cut-off
+vdw-modifier             = Potential-shift
+rvdw                     = 1.0       ; nm
+DispCorr                 = EnerPres  ; long-range dispersion correction
+pme-order                = 4
+fourierspacing           = 0.16      ; nm

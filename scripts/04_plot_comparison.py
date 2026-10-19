@@ -1,29 +1,47 @@
 #!/usr/bin/env python3
 # =============================================================================
 # 04_plot_comparison.py
-# Comparative figures and summary statistics, CHARMM36(m) vs GROMOS 53A6,
-# from the outputs of 03_analysis.sh (analysis/<ff>/rep<N>/).
+# Comparative figures and summary statistics for the four-way comparison
+# (CHARMM36m, AMBER, GROMOS 53A6, GROMOS 54A7), from the outputs of
+# 03_analysis.sh (analysis/<ff>/rep<N>/). Any subset of force fields and any
+# number of replicas is accepted; difference panels use one force field as
+# reference (--reference, default charmm36m).
+#
+# Two levels of comparison, as in a multi-replica benchmark:
+#   between replicas   fig7_replicas: each replica of each force field on
+#                      its own, to judge convergence and run-to-run spread
+#   between force fields   all other figures: replica means with SD bands,
+#                      distributions pooled over replicas, and "ff minus
+#                      reference" panels
 #
 # Figures (figures/):
-#   fig1_timeseries          RMSD, Rg, H-bonds (intra, water), SASA, contacts
+#   fig1_timeseries          RMSD, Rg, H-bonds (intra, water), SASA: replica
+#                            mean (running mean) with min-max band
 #   fig2_distributions       distributions over the equilibrated window
-#   fig3_rmsf                C-alpha RMSF per residue + difference
-#   fig4_contact_maps        mean residue distance maps + difference
-#   fig5_sasa_per_residue    heavy-atom SASA per residue + difference
+#   fig3_rmsf                C-alpha RMSF per residue + difference vs reference
+#   fig4_contact_maps        mean residue distance maps + differences vs reference
+#   fig5_sasa_per_residue    heavy-atom SASA per residue + difference vs reference
 #   fig6_quality_checks      EM, NVT, NPT and production thermodynamics
-# Table:
-#   summary_statistics.csv   mean, SD and block-averaged SEM per observable
+#   fig7_replicas            per-replica time series and RMSF for each force field
+# Tables:
+#   summary_statistics.csv   mean, SD and block SEM per observable, replica
+#                            and force field (replica "all" = mean +/- SD of
+#                            the replica means)
+#   summary_table.csv        one row per force field: mean +/- SD over
+#                            replicas for every observable (the table to
+#                            report), plus the difference vs the reference
 #
 # Usage:
 #   python3 scripts/04_plot_comparison.py
-#   python3 scripts/04_plot_comparison.py --smooth-ns 2 --formats png pdf
-# Requires: numpy, matplotlib
+#   python3 scripts/04_plot_comparison.py --reference amber --smooth-ns 2
+# Requires: numpy, matplotlib (scipy optional, for Welch t-test p-values)
 # =============================================================================
 
 import argparse
 import csv
 import re
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -33,14 +51,31 @@ matplotlib.use("Agg")  # headless backend: works on servers without a display
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 
+try:
+    from scipy import stats as _scipy_stats
+except ImportError:  # p-values are then reported as nan
+    _scipy_stats = None
+
 # -----------------------------------------------------------------------------
 # Style
 # -----------------------------------------------------------------------------
-# Fixed categorical order (validated colorblind-safe pair): the force field
-# always keeps its color, whatever subset of data is plotted.
-FF_ORDER = ["charmm36", "gromos53a6"]
-FF_NAME = {"charmm36": "CHARMM36m", "gromos53a6": "GROMOS 53A6"}
-FF_COLOR = {"charmm36": "#2a78d6", "gromos53a6": "#eb6834"}
+# Fixed categorical order and colors (Okabe-Ito, colorblind-safe): a force
+# field always keeps its color, whatever subset of data is plotted. Labels not
+# listed here (e.g. a fifth force field) get the remaining palette entries.
+FF_ORDER = ["charmm36m", "amber", "gromos53a6", "gromos54a7"]
+FF_COLOR = {
+    "charmm36m": "#0072b2",   # blue
+    "amber": "#009e73",       # green
+    "gromos53a6": "#e69f00",  # orange
+    "gromos54a7": "#d55e00",  # vermillion
+}
+EXTRA_COLORS = ["#cc79a7", "#56b4e9", "#8c8c8c", "#000000"]
+# Fallback names when meta.txt has no display_name (older analyses)
+FF_NAME_DEFAULT = {"charmm36m": "CHARMM36m", "charmm36": "CHARMM36m", "amber": "AMBER",
+                   "gromos53a6": "GROMOS 53A6", "gromos54a7": "GROMOS 54A7"}
+FF_NAME = dict(FF_NAME_DEFAULT)  # filled from meta.txt in discover()
+
+REP_STYLE = ["-", "--", ":", "-.", (0, (5, 1, 1, 1))]  # one line style per replica
 
 INK = "#0b0b0b"
 INK_2 = "#52514e"
@@ -74,6 +109,16 @@ plt.rcParams.update({
     "savefig.dpi": 300,
     "savefig.bbox": "tight",
 })
+
+
+def color_of(ff):
+    if ff not in FF_COLOR:
+        FF_COLOR[ff] = EXTRA_COLORS[len(FF_COLOR) % len(EXTRA_COLORS)]
+    return FF_COLOR[ff]
+
+
+def name_of(ff):
+    return FF_NAME.get(ff, ff)
 
 
 # -----------------------------------------------------------------------------
@@ -197,20 +242,32 @@ def block_sem(y, nblocks=5):
     return means.std(ddof=1) / np.sqrt(nblocks)
 
 
+def welch(a, b):
+    """Welch's t-test between two sets of replica means.
+
+    Returns (difference of means, SE of the difference, t, p). With three
+    replicas per group the test has about 2-4 degrees of freedom, so only
+    large, consistent differences reach significance; the point of the
+    table is the difference and its uncertainty, not the p-value. p is nan
+    when scipy is not installed or a group has fewer than two replicas.
+    """
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    diff = a.mean() - b.mean()
+    if len(a) < 2 or len(b) < 2:
+        return diff, np.nan, np.nan, np.nan
+    va, vb = a.var(ddof=1) / len(a), b.var(ddof=1) / len(b)
+    se = np.sqrt(va + vb)
+    if se == 0:
+        return diff, 0.0, np.nan, np.nan
+    t = diff / se
+    df = (va + vb) ** 2 / (va ** 2 / (len(a) - 1) + vb ** 2 / (len(b) - 1))
+    p = 2 * _scipy_stats.t.sf(abs(t), df) if _scipy_stats else np.nan
+    return diff, se, t, p
+
+
 # -----------------------------------------------------------------------------
 # Data discovery
 # -----------------------------------------------------------------------------
-def discover(ana_dir):
-    """Return {ff: [replica_dir, ...]} for every analysed replica."""
-    found = {}
-    for ff in FF_ORDER:
-        reps = sorted((ana_dir / ff).glob("rep*"), key=lambda p: int(re.sub(r"\D", "", p.name) or 0))
-        reps = [r for r in reps if (r / "meta.txt").exists()]
-        if reps:
-            found[ff] = reps
-    return found
-
-
 def read_meta(rep_dir):
     meta = {}
     for line in (rep_dir / "meta.txt").read_text().splitlines():
@@ -218,6 +275,29 @@ def read_meta(rep_dir):
             k, v = line.split("=", 1)
             meta[k] = v
     return meta
+
+
+def discover(ana_dir, only=None):
+    """Return {ff: [replica_dir, ...]} for every analysed replica.
+
+    Force fields are listed in FF_ORDER first, then any other label found
+    under the analysis directory. Display names are taken from meta.txt.
+    """
+    labels = [p.name for p in sorted(ana_dir.iterdir()) if p.is_dir()] if ana_dir.exists() else []
+    ordered = [f for f in FF_ORDER if f in labels] + [f for f in labels if f not in FF_ORDER]
+    if only:
+        ordered = [f for f in ordered if f in only]
+    found = {}
+    for ff in ordered:
+        reps = sorted((ana_dir / ff).glob("rep*"), key=lambda p: int(re.sub(r"\D", "", p.name) or 0))
+        reps = [r for r in reps if (r / "meta.txt").exists()]
+        if reps:
+            found[ff] = reps
+            name = read_meta(reps[0]).get("display_name")
+            if name:
+                FF_NAME[ff] = name
+            color_of(ff)
+    return found
 
 
 # Short panel titles for the compact distribution figure
@@ -233,6 +313,10 @@ OBSERVABLES = [
     ("sasa_heavy", "sasa_heavy.xvg", 1, "SASA (nm$^2$)", "SASA, heavy atoms (comparable)"),
     ("sasa_native", "sasa_native.xvg", 1, "SASA (nm$^2$)", "SASA, all atoms of each model"),
 ]
+# Observables reported in summary_table.csv (time series + mean RMSF)
+TABLE_OBSERVABLES = ["rmsd", "rg", "rmsf_mean", "hb_intra", "hb_water", "sasa_heavy"]
+TABLE_UNITS = {"rmsd": "nm", "rg": "nm", "rmsf_mean": "nm", "hb_intra": "count",
+               "hb_water": "count", "sasa_heavy": "nm^2"}
 
 
 def load_series(rep_dir, fname, col):
@@ -262,6 +346,11 @@ def load_by_legend(rep_dir, fname, legend):
     return (data[:, 0], data[:, col]) if data.shape[1] > col else None
 
 
+def window(t, y, skip_ns):
+    """Equilibrated part of a series (whole series if it is too short)."""
+    return y[t >= skip_ns] if np.any(t >= skip_ns) else y
+
+
 # -----------------------------------------------------------------------------
 # Figures
 # -----------------------------------------------------------------------------
@@ -277,25 +366,38 @@ def shade_skip(ax, skip_ns):
         ax.axvspan(0, skip_ns, color="#f0efec", zorder=0, lw=0)
 
 
-def ff_legend(ax, ffs, loc="best"):
-    handles = [plt.Line2D([], [], color=FF_COLOR[f], lw=2, label=FF_NAME[f]) for f in ffs]
-    ax.legend(handles=handles, loc=loc)
+def ff_legend(ax, ffs, loc="best", **kw):
+    handles = [plt.Line2D([], [], color=color_of(f), lw=2, label=name_of(f)) for f in ffs]
+    ax.legend(handles=handles, loc=loc, **kw)
 
 
 def fig_timeseries(found, skip_ns, smooth_ns, fig_dir, formats):
+    """Replica mean (running mean) per force field with a min-max band."""
     fig, axes = plt.subplots(3, 2, figsize=(10, 9.2), sharex=True)
     for ax, (key, fname, col, ylabel, title) in zip(axes.flat, OBSERVABLES):
         shade_skip(ax, skip_ns)
         plotted = False
         for ff, reps in found.items():
+            curves = []
             for rep in reps:
                 s = load_series(rep, fname, col)
-                if s is None:
-                    continue
-                t, y = s
-                ax.plot(t, y, color=FF_COLOR[ff], lw=0.5, alpha=0.25)
-                ax.plot(t, running_mean(t, y, smooth_ns), color=FF_COLOR[ff], lw=1.6)
-                plotted = True
+                if s is not None:
+                    curves.append((s[0], running_mean(s[0], s[1], smooth_ns)))
+            if not curves:
+                continue
+            # replicas may differ in length (partial runs): align on the shortest
+            n = min(len(c[0]) for c in curves)
+            t = curves[0][0][:n]
+            arr = np.vstack([c[1][:n] for c in curves])
+            # the running mean is NaN-padded at the edges: those columns are
+            # all-NaN and are simply not drawn
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                lo, hi, mean = np.nanmin(arr, axis=0), np.nanmax(arr, axis=0), np.nanmean(arr, axis=0)
+            if len(curves) > 1:
+                ax.fill_between(t, lo, hi, color=color_of(ff), alpha=0.18, lw=0)
+            ax.plot(t, mean, color=color_of(ff), lw=1.5)
+            plotted = True
         ax.set_title(title, loc="left", color=INK)
         ax.set_ylabel(ylabel)
         if not plotted:
@@ -304,8 +406,11 @@ def fig_timeseries(found, skip_ns, smooth_ns, fig_dir, formats):
     for ax in axes[-1]:
         ax.set_xlabel("Time (ns)")
     ff_legend(axes[0, 0], list(found), loc="lower right")
-    fig.suptitle(f"Time series (thin: raw; thick: {smooth_ns:g} ns running mean; "
-                 f"gray band: first {skip_ns:g} ns, excluded from averages)",
+    nrep = max(len(r) for r in found.values())
+    fig.suptitle(f"Time series: {smooth_ns:g} ns running mean, averaged over replicas "
+                 f"(band: min-max across replicas; gray: first {skip_ns:g} ns, excluded from averages)"
+                 if nrep > 1 else
+                 f"Time series: {smooth_ns:g} ns running mean (gray band: first {skip_ns:g} ns, excluded from averages)",
                  x=0.01, ha="left", fontsize=9, color=INK_2)
     fig.tight_layout()
     save(fig, fig_dir, "fig1_timeseries", formats)
@@ -323,7 +428,7 @@ def fig_distributions(found, skip_ns, fig_dir, formats, stats_rows):
                 if s is None:
                     continue
                 t, y = s
-                y = y[t >= skip_ns] if np.any(t >= skip_ns) else y
+                y = window(t, y, skip_ns)
                 vals.append(y)
                 stats_rows.append({
                     "observable": key, "force_field": ff, "replica": i,
@@ -348,23 +453,23 @@ def fig_distributions(found, skip_ns, fig_dir, formats, stats_rows):
             else:
                 bins = np.linspace(lo, hi, 40) if hi > lo else 10
             for ff, v in pooled.items():
-                ax.hist(v, bins=bins, density=True, histtype="step", lw=1.6, color=FF_COLOR[ff])
-                ax.axvline(v.mean(), color=FF_COLOR[ff], lw=1, ls="--")
+                ax.hist(v, bins=bins, density=True, histtype="step", lw=1.6, color=color_of(ff))
+                ax.axvline(v.mean(), color=color_of(ff), lw=1, ls="--")
         ax.set_title(SHORT_TITLE.get(key, title), loc="left", color=INK, fontsize=8.5)
         ax.set_xlabel(xlabel)
         ax.set_yticks([])
         ax.grid(axis="y", visible=False)
     axes[0].set_ylabel("Probability density")
-    handles = [plt.Line2D([], [], color=FF_COLOR[f], lw=2, label=FF_NAME[f]) for f in found]
+    handles = [plt.Line2D([], [], color=color_of(f), lw=2, label=name_of(f)) for f in found]
     fig.legend(handles=handles, loc="upper right", ncol=len(handles), bbox_to_anchor=(0.995, 1.02))
-    fig.suptitle(f"Distributions after {skip_ns:g} ns (dashed: mean)",
+    fig.suptitle(f"Distributions after {skip_ns:g} ns, pooled over replicas (dashed: mean)",
                  x=0.01, ha="left", fontsize=9, color=INK_2)
     fig.tight_layout()
     save(fig, fig_dir, "fig2_distributions", formats)
 
 
-def per_residue_mean(found, fname, col):
-    """{ff: (residues, mean over replicas, sd over replicas or None)}"""
+def per_residue_curves(found, fname, col):
+    """{ff: (residues, [curve per replica])} for a per-residue xvg."""
     out = {}
     for ff, reps in found.items():
         curves = []
@@ -376,42 +481,61 @@ def per_residue_mean(found, fname, col):
         if not curves:
             continue
         res = curves[0][0]
-        same = [c[1] for c in curves if len(c[0]) == len(res)]
-        arr = np.vstack(same)
+        out[ff] = (res, [c[1] for c in curves if len(c[0]) == len(res)])
+    return out
+
+
+def per_residue_mean(found, fname, col):
+    """{ff: (residues, mean over replicas, sd over replicas or None)}"""
+    out = {}
+    for ff, (res, curves) in per_residue_curves(found, fname, col).items():
+        arr = np.vstack(curves)
         out[ff] = (res, arr.mean(axis=0), arr.std(axis=0, ddof=1) if len(arr) > 1 else None)
     return out
 
 
-def fig_per_residue(found, fname, col, ylabel, title, diff_label, name, fig_dir, formats):
+def fig_per_residue(found, reference, fname, col, ylabel, title, diff_label, name, fig_dir, formats):
     data = per_residue_mean(found, fname, col)
     if not data:
         print(f"  skipped {name}: {fname} not found")
         return
-    fig, (ax, axd) = plt.subplots(2, 1, figsize=(10, 5.4), sharex=True,
+    fig, (ax, axd) = plt.subplots(2, 1, figsize=(10, 5.6), sharex=True,
                                   gridspec_kw={"height_ratios": [2.2, 1]})
     for ff, (res, m, sd) in data.items():
         if sd is not None:
-            ax.fill_between(res, m - sd, m + sd, color=FF_COLOR[ff], alpha=0.18, lw=0)
-        ax.plot(res, m, color=FF_COLOR[ff], lw=1.6)
+            ax.fill_between(res, m - sd, m + sd, color=color_of(ff), alpha=0.18, lw=0)
+        ax.plot(res, m, color=color_of(ff), lw=1.5)
     ax.set_ylabel(ylabel)
-    ax.set_title(title, loc="left", color=INK)
-    ff_legend(ax, list(data), loc="upper right")
+    ax.set_title(title + (" (replica mean, band: SD over replicas)" if any(
+        d[2] is not None for d in data.values()) else ""), loc="left", color=INK)
+    ff_legend(ax, list(data), loc="upper right", ncol=min(len(data), 4))
 
-    if all(f in data for f in FF_ORDER) and len(data[FF_ORDER[0]][0]) == len(data[FF_ORDER[1]][0]):
-        res = data[FF_ORDER[0]][0]
-        diff = data[FF_ORDER[0]][1] - data[FF_ORDER[1]][1]
-        axd.bar(res, diff, width=0.85, color=np.where(diff >= 0, FF_COLOR["charmm36"], FF_COLOR["gromos53a6"]))
+    others = [f for f in data if f != reference]
+    if reference in data and others:
+        res_ref, m_ref, _ = data[reference]
         axd.axhline(0, color=INK_2, lw=0.6)
+        drawn = 0
+        for ff in others:
+            res, m, _ = data[ff]
+            if len(res) != len(res_ref):
+                continue
+            axd.plot(res, m - m_ref, color=color_of(ff), lw=1.3)
+            axd.fill_between(res, 0, m - m_ref, color=color_of(ff), alpha=0.12, lw=0)
+            drawn += 1
         axd.set_ylabel(diff_label)
+        axd.set_title(f"Difference vs {name_of(reference)}", loc="left", color=INK, fontsize=9)
+        if drawn == 0:
+            axd.text(0.5, 0.5, "residue numbering differs between force fields",
+                     ha="center", va="center", transform=axd.transAxes, color=INK_2)
     else:
-        axd.text(0.5, 0.5, "difference requires both force fields with identical residue numbering",
+        axd.text(0.5, 0.5, f"difference panel requires the reference force field ({reference})",
                  ha="center", va="center", transform=axd.transAxes, color=INK_2)
     axd.set_xlabel("Residue")
     fig.tight_layout()
     save(fig, fig_dir, name, formats)
 
 
-def fig_contact_maps(found, cutoff, fig_dir, formats):
+def fig_contact_maps(found, reference, cutoff, fig_dir, formats):
     mats = {}
     for ff, reps in found.items():
         arrs = []
@@ -428,35 +552,45 @@ def fig_contact_maps(found, cutoff, fig_dir, formats):
         print("  skipped fig4_contact_maps: mdmat_mean.xpm not found")
         return
 
-    both = all(f in mats for f in FF_ORDER) and mats[FF_ORDER[0]][0].shape == mats[FF_ORDER[1]][0].shape
-    ncols = 3 if both else len(mats)
-    fig, axes = plt.subplots(1, ncols, figsize=(4.3 * ncols, 4.2))
-    axes = np.atleast_1d(axes)
-    for ax, (ff, (m, x, y)) in zip(axes, mats.items()):
+    others = [f for f in mats if f != reference]
+    diffs = {}
+    if reference in mats:
+        m_ref = mats[reference][0]
+        for ff in others:
+            if mats[ff][0].shape == m_ref.shape:
+                diffs[ff] = mats[ff][0] - m_ref
+    ncols = len(mats)
+    nrows = 2 if diffs else 1
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.3 * ncols, 4.2 * nrows), squeeze=False)
+
+    for ax, (ff, (m, x, y)) in zip(axes[0], mats.items()):
         ext = [x[0] - 0.5, x[-1] + 0.5, y[0] - 0.5, y[-1] + 0.5]
         im = ax.imshow(m, origin="lower", extent=ext, cmap=SEQ_CMAP, vmin=0, vmax=cutoff,
                        interpolation="nearest", aspect="equal")
-        ax.set_title(f"{FF_NAME[ff]}: mean min. distance", loc="left", color=INK)
+        ax.set_title(f"{name_of(ff)}: mean min. distance", loc="left", color=INK)
         ax.set_xlabel("Residue")
         ax.grid(False)
         cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
         cb.set_label("Distance (nm)")
-    axes[0].set_ylabel("Residue")
-    if both:
-        m1, x, y = mats[FF_ORDER[0]]
-        diff = m1 - mats[FF_ORDER[1]][0]
-        lim = max(np.nanmax(np.abs(diff)), 1e-3)
-        ax = axes[2]
+    axes[0][0].set_ylabel("Residue")
+
+    if diffs:
+        lim = max(max(np.nanmax(np.abs(d)) for d in diffs.values()), 1e-3)
+        x, y = mats[reference][1], mats[reference][2]
         ext = [x[0] - 0.5, x[-1] + 0.5, y[0] - 0.5, y[-1] + 0.5]
-        im = ax.imshow(diff, origin="lower", extent=ext, cmap=DIV_CMAP,
-                       norm=TwoSlopeNorm(vcenter=0, vmin=-lim, vmax=lim),
-                       interpolation="nearest", aspect="equal")
-        ax.set_title("CHARMM36m minus GROMOS 53A6", loc="left", color=INK)
-        ax.set_xlabel("Residue")
-        ax.grid(False)
-        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-        cb.set_label("$\\Delta$ distance (nm); <0: closer in CHARMM")
-    fig.suptitle(f"Residue contact maps, heavy atoms (gmx mdmat, cutoff {cutoff:g} nm)",
+        for ax, (ff, d) in zip(axes[1], diffs.items()):
+            im = ax.imshow(d, origin="lower", extent=ext, cmap=DIV_CMAP,
+                           norm=TwoSlopeNorm(vcenter=0, vmin=-lim, vmax=lim),
+                           interpolation="nearest", aspect="equal")
+            ax.set_title(f"{name_of(ff)} minus {name_of(reference)}", loc="left", color=INK)
+            ax.set_xlabel("Residue")
+            ax.grid(False)
+            cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+            cb.set_label(f"$\\Delta$ distance (nm); <0: closer in {name_of(ff)}")
+        axes[1][0].set_ylabel("Residue")
+        for ax in axes[1][len(diffs):]:
+            ax.axis("off")
+    fig.suptitle(f"Residue contact maps, heavy atoms, replica mean (gmx mdmat, cutoff {cutoff:g} nm)",
                  x=0.01, ha="left", fontsize=9, color=INK_2)
     fig.tight_layout()
     save(fig, fig_dir, "fig4_contact_maps", formats)
@@ -479,10 +613,10 @@ def fig_quality(found, ana_dir, fig_dir, formats):
                 if p.exists():
                     d, _ = read_xvg(p)
                     # EM "time" is the step number; undo the ps -> ns conversion
-                    ax.plot(d[:, 0] * 1000, d[:, 1], color=FF_COLOR[ff], lw=1.6)
+                    ax.plot(d[:, 0] * 1000, d[:, 1], color=color_of(ff), lw=1.6)
                     ax.set_xlabel("EM step")
                 continue
-            for rep in reps:
+            for i, rep in enumerate(reps):
                 fname, term = {
                     "nvt_T": ("qc_nvt_temperature.xvg", "Temperature"),
                     "npt_P": ("qc_npt_pressure.xvg", "Pressure"),
@@ -496,15 +630,80 @@ def fig_quality(found, ana_dir, fig_dir, formats):
                 t, y = s
                 if key.startswith(("nvt", "npt")):
                     t = t * 1000  # short runs: show ps
-                ax.plot(t, y, color=FF_COLOR[ff], lw=0.8, alpha=0.9)
+                ax.plot(t, y, color=color_of(ff), lw=0.8, alpha=0.9,
+                        ls=REP_STYLE[i % len(REP_STYLE)])
                 ax.set_xlabel("Time (ps)" if key.startswith(("nvt", "npt")) else "Time (ns)")
         ax.set_title(title, loc="left", color=INK)
         ax.set_ylabel(ylabel)
     ff_legend(axes[0, 1], list(found), loc="lower right")
-    fig.suptitle("Equilibration and production quality checks",
+    fig.suptitle("Equilibration and production quality checks (line style: replica)",
                  x=0.01, ha="left", fontsize=9, color=INK_2)
     fig.tight_layout()
     save(fig, fig_dir, "fig6_quality_checks", formats)
+
+
+def fig_replicas(found, skip_ns, smooth_ns, fig_dir, formats):
+    """One row per force field, each replica as its own line: convergence
+    and run-to-run spread within a force field, before any comparison
+    between force fields."""
+    cols = [o for o in OBSERVABLES if o[0] in ("rmsd", "rg", "hb_intra", "sasa_heavy")]
+    nrows = len(found)
+    fig, axes = plt.subplots(nrows, len(cols) + 1, figsize=(3.0 * (len(cols) + 1), 2.3 * nrows),
+                             squeeze=False)
+    rmsf = per_residue_curves(found, "rmsf_ca.xvg", 1)
+    for i, (ff, reps) in enumerate(found.items()):
+        for ax, (key, fname, col, ylabel, title) in zip(axes[i], cols):
+            shade_skip(ax, skip_ns)
+            for r, rep in enumerate(reps):
+                s = load_series(rep, fname, col)
+                if s is None:
+                    continue
+                t, y = s
+                ax.plot(t, y, color=color_of(ff), lw=0.4, alpha=0.2)
+                ax.plot(t, running_mean(t, y, smooth_ns), color=color_of(ff), lw=1.2,
+                        ls=REP_STYLE[r % len(REP_STYLE)], label=f"rep {r + 1}")
+            ax.set_ylabel(ylabel)
+            if i == 0:
+                ax.set_title(SHORT_TITLE.get(key, title), loc="left", color=INK)
+            if i == nrows - 1:
+                ax.set_xlabel("Time (ns)")
+        axr = axes[i][-1]
+        if ff in rmsf:
+            res, curves = rmsf[ff]
+            for r, c in enumerate(curves):
+                axr.plot(res, c, color=color_of(ff), lw=1.0, ls=REP_STYLE[r % len(REP_STYLE)],
+                         label=f"rep {r + 1}")
+        axr.set_ylabel("RMSF (nm)")
+        if i == 0:
+            axr.set_title("C-alpha RMSF per residue", loc="left", color=INK)
+        if i == nrows - 1:
+            axr.set_xlabel("Residue")
+        axr.legend(loc="upper right", fontsize=7.5, ncol=2)
+        axes[i][0].text(-0.28, 0.5, name_of(ff), transform=axes[i][0].transAxes, rotation=90,
+                        ha="center", va="center", color=color_of(ff), fontsize=10, fontweight="bold")
+    fig.suptitle(f"Replicas within each force field ({smooth_ns:g} ns running mean; "
+                 f"gray band: first {skip_ns:g} ns)", x=0.01, ha="left", fontsize=9, color=INK_2)
+    fig.tight_layout()
+    save(fig, fig_dir, "fig7_replicas", formats)
+
+
+# -----------------------------------------------------------------------------
+# Tables
+# -----------------------------------------------------------------------------
+def rmsf_rows(found, stats_rows):
+    """Mean C-alpha RMSF over residues per replica (the per-residue curves are
+    plotted in fig3 and fig7); appended to stats_rows as observable rmsf_mean."""
+    for ff, (res, curves) in per_residue_curves(found, "rmsf_ca.xvg", 1).items():
+        means = []
+        for i, c in enumerate(curves, start=1):
+            means.append(c.mean())
+            stats_rows.append({"observable": "rmsf_mean", "force_field": ff, "replica": i,
+                               "mean": c.mean(), "sd": c.std(ddof=1), "block_sem": np.nan,
+                               "n_frames": len(c)})
+        means = np.array(means)
+        stats_rows.append({"observable": "rmsf_mean", "force_field": ff, "replica": "all",
+                           "mean": means.mean(), "sd": means.std(ddof=1) if len(means) > 1 else np.nan,
+                           "block_sem": np.nan, "n_frames": len(res)})
 
 
 def write_summary(rows, path):
@@ -516,31 +715,74 @@ def write_summary(rows, path):
             w.writerow({k: (f"{r[k]:.4f}" if isinstance(r[k], float) else r[k]) for k in fields})
     print(f"  wrote {path}")
 
-    # Console overview: per force field, pooled over replicas
-    print("\n  observable      " + "".join(f"{FF_NAME[f]:>24s}" for f in FF_ORDER))
-    for key in dict.fromkeys(r["observable"] for r in rows):
+
+def write_table(rows, found, reference, path):
+    """One row per force field and observable: mean +/- SD over replicas,
+    plus the difference vs the reference with Welch's t-test."""
+    ffs = list(found)
+    rep_means = {}
+    for key in TABLE_OBSERVABLES:
+        for ff in ffs:
+            vals = [r["mean"] for r in rows
+                    if r["observable"] == key and r["force_field"] == ff and r["replica"] != "all"]
+            if vals:
+                rep_means[(key, ff)] = np.array(vals)
+
+    fields = ["observable", "unit", "force_field", "n_replicas", "mean", "sd_replicas",
+              "diff_vs_reference", "se_diff", "welch_t", "welch_p"]
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        for key in TABLE_OBSERVABLES:
+            for ff in ffs:
+                if (key, ff) not in rep_means:
+                    continue
+                a = rep_means[(key, ff)]
+                row = {"observable": key, "unit": TABLE_UNITS[key], "force_field": ff,
+                       "n_replicas": len(a), "mean": f"{a.mean():.4f}",
+                       "sd_replicas": f"{a.std(ddof=1):.4f}" if len(a) > 1 else "",
+                       "diff_vs_reference": "", "se_diff": "", "welch_t": "", "welch_p": ""}
+                if ff != reference and (key, reference) in rep_means:
+                    d, se, t, p = welch(a, rep_means[(key, reference)])
+                    row.update({"diff_vs_reference": f"{d:.4f}",
+                                "se_diff": "" if np.isnan(se) else f"{se:.4f}",
+                                "welch_t": "" if np.isnan(t) else f"{t:.2f}",
+                                "welch_p": "" if np.isnan(p) else f"{p:.3f}"})
+                w.writerow(row)
+    print(f"  wrote {path}")
+
+    # Console overview: mean +/- SD of replica means (block SEM for n = 1)
+    colw = 24
+    print("\n  observable      " + "".join(f"{name_of(f):>{colw}s}" for f in ffs))
+    for key in TABLE_OBSERVABLES:
         line = f"  {key:<15s} "
-        for ff in FF_ORDER:
-            reps = [r for r in rows if r["observable"] == key and r["force_field"] == ff and r["replica"] != "all"]
-            if not reps:
-                line += f"{'-':>24s}"
-                continue
-            if len(reps) == 1:
-                r = reps[0]
-                line += f"{r['mean']:>12.3f} +/- {r['block_sem']:<7.3f}"
+        for ff in ffs:
+            a = rep_means.get((key, ff))
+            if a is None:
+                line += f"{'-':>{colw}s}"
+            elif len(a) == 1:
+                sem = [r["block_sem"] for r in rows
+                       if r["observable"] == key and r["force_field"] == ff and r["replica"] != "all"][0]
+                line += f"{a[0]:>12.3f} +/- {sem:<7.3f}"
             else:
-                agg = [r for r in rows if r["observable"] == key and r["force_field"] == ff and r["replica"] == "all"][0]
-                line += f"{agg['mean']:>12.3f} +/- {agg['sd']:<7.3f}"
+                line += f"{a.mean():>12.3f} +/- {a.std(ddof=1):<7.3f}"
         print(line)
-    print("  (one replica: +/- block SEM; several replicas: +/- SD of replica means)")
+    nrep = sorted({len(a) for a in rep_means.values()})
+    print(f"  (n = {', '.join(map(str, nrep))} replicas; +/- SD of replica means, or block SEM when n = 1)")
+    if reference in ffs:
+        print(f"  differences vs {name_of(reference)} with Welch's t-test: {path.name}"
+              + ("" if _scipy_stats else " (install scipy for p-values)"))
 
 
 # -----------------------------------------------------------------------------
 def main():
     root = Path(__file__).resolve().parent.parent
-    ap = argparse.ArgumentParser(description="CHARMM36m vs GROMOS 53A6 comparison plots")
+    ap = argparse.ArgumentParser(description="Force field comparison plots (CHARMM36m, AMBER, GROMOS 53A6, GROMOS 54A7)")
     ap.add_argument("--analysis-dir", type=Path, default=root / "analysis")
     ap.add_argument("--fig-dir", type=Path, default=root / "figures")
+    ap.add_argument("--reference", default="charmm36m",
+                    help="force field label used for the difference panels and the table (default: charmm36m)")
+    ap.add_argument("--only", nargs="+", default=None, help="restrict to these force field labels")
     ap.add_argument("--skip-ns", type=float, default=None,
                     help="exclude this initial time from averages (default: value used by 03_analysis.sh)")
     ap.add_argument("--smooth-ns", type=float, default=1.0, help="running-mean window (ns)")
@@ -549,7 +791,7 @@ def main():
     ap.add_argument("--formats", nargs="+", default=["png", "pdf"])
     args = ap.parse_args()
 
-    found = discover(args.analysis_dir)
+    found = discover(args.analysis_dir, args.only)
     if not found:
         sys.exit(f"no analysed replicas under {args.analysis_dir}; run scripts/03_analysis.sh first")
     args.fig_dir.mkdir(parents=True, exist_ok=True)
@@ -560,21 +802,30 @@ def main():
     if args.mdmat_cutoff is None:
         args.mdmat_cutoff = float(first.get("mdmat_cutoff_nm", 1.5))
 
-    print("replicas found: " + ", ".join(f"{FF_NAME[f]} x{len(r)}" for f, r in found.items()))
+    print("replicas found: " + ", ".join(f"{name_of(f)} x{len(r)}" for f, r in found.items()))
     if len(found) < 2:
         print("  note: only one force field found; difference panels are skipped")
+    if args.reference not in found:
+        print(f"  note: reference '{args.reference}' not found; difference panels are skipped "
+              f"(use --reference with one of: {', '.join(found)})")
+    nrep = {len(r) for r in found.values()}
+    if nrep != {1} and min(nrep) < 3:
+        print("  note: fewer than 3 replicas for some force fields; SD over replicas is unreliable")
 
     stats_rows = []
     fig_timeseries(found, args.skip_ns, args.smooth_ns, args.fig_dir, args.formats)
     fig_distributions(found, args.skip_ns, args.fig_dir, args.formats, stats_rows)
-    fig_per_residue(found, "rmsf_ca.xvg", 1, "RMSF (nm)", "C-alpha RMSF per residue",
-                    "$\\Delta$RMSF (nm)\nCHARMM - GROMOS", "fig3_rmsf", args.fig_dir, args.formats)
-    fig_contact_maps(found, args.mdmat_cutoff, args.fig_dir, args.formats)
-    fig_per_residue(found, "sasa_heavy_res.xvg", 1, "SASA (nm$^2$)",
-                    "Heavy-atom SASA per residue", "$\\Delta$SASA (nm$^2$)\nCHARMM - GROMOS",
+    fig_per_residue(found, args.reference, "rmsf_ca.xvg", 1, "RMSF (nm)", "C-alpha RMSF per residue",
+                    "$\\Delta$RMSF (nm)", "fig3_rmsf", args.fig_dir, args.formats)
+    fig_contact_maps(found, args.reference, args.mdmat_cutoff, args.fig_dir, args.formats)
+    fig_per_residue(found, args.reference, "sasa_heavy_res.xvg", 1, "SASA (nm$^2$)",
+                    "Heavy-atom SASA per residue", "$\\Delta$SASA (nm$^2$)",
                     "fig5_sasa_per_residue", args.fig_dir, args.formats)
     fig_quality(found, args.analysis_dir, args.fig_dir, args.formats)
+    fig_replicas(found, args.skip_ns, args.smooth_ns, args.fig_dir, args.formats)
+    rmsf_rows(found, stats_rows)
     write_summary(stats_rows, args.fig_dir / "summary_statistics.csv")
+    write_table(stats_rows, found, args.reference, args.fig_dir / "summary_table.csv")
 
 
 if __name__ == "__main__":

@@ -1,2 +1,4 @@
 numpy>=1.22
 matplotlib>=3.6
+# optional: p-values for the Welch t-test in summary_table.csv
+scipy>=1.9

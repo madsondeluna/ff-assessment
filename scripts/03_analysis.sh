@@ -7,20 +7,22 @@
 #   plus equilibration quality checks (EM, NVT, NPT, production energies).
 # Results: analysis/<ff>/rep<N>/*.xvg|*.xpm  (plots: 04_plot_comparison.py)
 #
-# Comparability between an all-atom (CHARMM36) and a united-atom (GROMOS)
-# model is handled explicitly:
-#   - RMSD/RMSF use backbone / C-alpha atoms, present in both models.
+# Comparability between the all-atom models (CHARMM36m, AMBER) and the
+# united-atom ones (GROMOS 53A6, 54A7) is handled explicitly:
+#   - RMSD/RMSF use backbone / C-alpha atoms, present in every model.
 #   - SASA is reported twice: "native" (all atoms each model has) and
-#     "heavy" (hydrogens removed in both). Only "heavy" is directly
+#     "heavy" (hydrogens removed in all). Only "heavy" is directly
 #     comparable, because GROMOS lacks aliphatic hydrogens and gmx sasa uses
 #     element radii, which underestimates united-atom CHn surfaces.
 #   - The contact map uses heavy atoms only, for the same reason (explicit
-#     hydrogens shorten residue-residue minimum distances in CHARMM).
-#   - H-bonds involve polar hydrogens, which are explicit in both models.
+#     hydrogens shorten residue-residue minimum distances in CHARMM/AMBER).
+#   - H-bonds involve polar hydrogens, which are explicit in every model.
+# Every replica is analysed on its own; 04_plot_comparison.py compares the
+# replicas within a force field and the force fields with each other.
 #
 # Usage:
 #   bash scripts/03_analysis.sh               # all force fields and replicas
-#   bash scripts/03_analysis.sh gromos53a6    # one force field
+#   bash scripts/03_analysis.sh gromos54a7    # one force field
 #   FORCE=1 bash scripts/03_analysis.sh       # recompute existing outputs
 # =============================================================================
 
@@ -88,8 +90,9 @@ analyse_replica() {
         warn "[$ff rep$r] trajectory ends at ${tlast} ps, shorter than SKIP_NS=${SKIP_NS} ns; averages use the whole run"
         skip_ps=0
     fi
-    printf 'force_field=%s\nreplica=%s\ngromacs=%s\nlast_time_ps=%s\nskip_ps=%s\nmdmat_cutoff_nm=%s\n' \
-        "$ff" "$r" "$GMX_VERSION" "$tlast" "$skip_ps" "$MDMAT_CUTOFF" >"$A/meta.txt"
+    printf 'force_field=%s\ndisplay_name=%s\nff_dir=%s\nwater=%s\nfamily=%s\nreplica=%s\ngromacs=%s\nlast_time_ps=%s\nskip_ps=%s\nmdmat_cutoff_nm=%s\n' \
+        "$ff" "$(ff_display_name "$ff")" "$(ff_dir_name "$ff")" "$(ff_water "$ff")" "$(ff_family "$ff")" \
+        "$r" "$GMX_VERSION" "$tlast" "$skip_ps" "$MDMAT_CUTOFF" >"$A/meta.txt"
     log "[$ff rep$r] trajectory length ${tlast} ps; averages from ${skip_ps} ps"
 
     local tpr="$R/md.tpr" ndx="$A/index.ndx" trj="$A/md_center.xtc"

@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
 # 01_prepare.sh
-# Builds and equilibrates eIF4E in water with CHARMM36(m) and GROMOS 53A6:
+# Builds and equilibrates eIF4E in water with every force field in FF_LABELS
+# (CHARMM36m, AMBER, GROMOS 53A6, GROMOS 54A7 by default):
 #   clean PDB -> pdb2gmx -> box -> solvate -> ions -> EM      (runs/<ff>/build)
 #   NVT (posres) -> NPT (posres) -> production .tpr           (runs/<ff>/repN)
+# Each replica gets its own NVT velocity seed (SEED_BASE + replica) and its
+# own equilibration, so the N_REPLICAS production runs are independent.
 # Production itself is run by 02_run_production.sh.
 #
 # Usage:
-#   bash scripts/01_prepare.sh              # both force fields
-#   bash scripts/01_prepare.sh gromos53a6   # only one
-#   FORCE=1 bash scripts/01_prepare.sh      # redo steps already completed
+#   bash scripts/01_prepare.sh                    # all force fields
+#   bash scripts/01_prepare.sh gromos54a7 amber   # a subset
+#   FORCE=1 bash scripts/01_prepare.sh            # redo steps already completed
 # =============================================================================
 
 source "$(dirname "$0")/lib.sh"
@@ -99,7 +102,7 @@ $gaps
     fi
 }
 
-# pdb2gmx histidine menu order is identical for CHARMM36 and GROMOS in
+# pdb2gmx histidine menu order is the same for every force field in
 # GROMACS: 0 = H on ND1, 1 = H on NE2, 2 = both.
 his_input() {
     local nhis=$1 s out=""
@@ -132,14 +135,15 @@ his_states_from_top() {
 # 2. System build + energy minimization
 # -----------------------------------------------------------------------------
 build_system() {
-    local ff=$1 ffname water ffpath pos neg
+    local ff=$1 ffname water ffpath pos neg solvent_box
     ffname=$(ff_dir_name "$ff"); water=$(ff_water "$ff")
     ffpath=$(require_ff "$ff")
-    read -r pos neg <<<"$(ff_ion_names "$ffpath")"
+    check_ff_combo "$ff"
+    solvent_box=$(ff_solvent_box "$ff")
 
     local B="$RUN_DIR/$ff/build" L
     mkdir -p "$B"; L="$REPO_ROOT/$B/prepare.log"
-    log "[$ff] force field: $ffpath | water: $water | ions: $pos/$neg"
+    log "[$ff] $(ff_display_name "$ff") | force field: $ffpath | water: $water"
 
     if must_run "$B/em.gro"; then
         : >"$L"
@@ -154,18 +158,25 @@ build_system() {
 
         pushd "$B" >/dev/null
         # pdb2gmx: -ignh discards input hydrogens so each force field builds
-        # its own (all-atom for CHARMM, polar + aromatic H only for GROMOS).
+        # its own (all-atom for CHARMM and AMBER, polar + aromatic H only for
+        # GROMOS). Residue renaming for CMAP assignment (ff19SB, GROMACS >=
+        # 2026, -rtpres auto) is left at its default.
         log "[$ff] pdb2gmx"
         gmx_run_input "$L" "$hisin" pdb2gmx -f protein_clean.pdb -o processed.gro \
             -p topol.top -i posre.itp -ff "$ffname" -water "$water" -ignh $hisflag
         { grep -E "^Total charge" "$L" || true; } | tail -n 1 | sed "s/^/[$ff] /"
         his_states_from_top >his_states.txt
 
+        # Ion molecule names come from the ion .itp the topology includes
+        # (water-model-specific in the built-in AMBER ff14SB/ff19SB ports).
+        read -r pos neg <<<"$(ff_ion_names "$ffpath" topol.top)"
+        log "[$ff] ions: $pos/$neg | solvent box: $solvent_box"
+
         log "[$ff] box: $BOX_TYPE, ${BOX_DIST} nm"
         gmx_run "$L" editconf -f processed.gro -o boxed.gro -c -d "$BOX_DIST" -bt "$BOX_TYPE"
 
         log "[$ff] solvate"
-        gmx_run "$L" solvate -cp boxed.gro -cs spc216.gro -o solvated.gro -p topol.top
+        gmx_run "$L" solvate -cp boxed.gro -cs "$solvent_box" -o solvated.gro -p topol.top
 
         log "[$ff] ions: neutralize + ${SALT_CONC} M NaCl"
         gmx_run "$L" grompp -f "$REPO_ROOT/$MDP_DIR/$ff/ions.mdp" -c solvated.gro \
@@ -234,19 +245,23 @@ equilibrate_replica() {
     fi
 }
 
-# Cross-check that both force fields received the same protonation states
-# and the same net charge; differences would confound the comparison.
+# Cross-check that every built force field received the same protonation
+# states and the same net charge; differences would confound the comparison.
+# Every system is compared with the first one that has been built.
 crosscheck() {
-    local a="$RUN_DIR/charmm36/build" b="$RUN_DIR/gromos53a6/build"
-    [[ -s "$a/his_states.txt" && -s "$b/his_states.txt" ]] || return 0
-    local ha hb qa qb
-    ha=$(cat "$a/his_states.txt"); hb=$(cat "$b/his_states.txt")
-    qa=$(grep -E "^Total charge" "$a/prepare.log" | tail -n 1 | grep -oE -- '-?[0-9]+\.[0-9]+' || true)
-    qb=$(grep -E "^Total charge" "$b/prepare.log" | tail -n 1 | grep -oE -- '-?[0-9]+\.[0-9]+' || true)
-    log "HIS states  charmm36: [${ha% }]  gromos53a6: [${hb% }]"
-    log "net charge  charmm36: ${qa:-?}  gromos53a6: ${qb:-?}"
-    [[ "$ha" == "$hb" ]] || warn "histidine states differ between force fields; set HIS_STATES explicitly and rerun with FORCE=1"
-    [[ "$qa" == "$qb" ]] || warn "net protein charge differs between force fields; check termini and protonation"
+    local ff b h q ref_h="" ref_q="" ref_ff=""
+    for ff in "${FF_LABELS[@]}"; do
+        b="$RUN_DIR/$ff/build"
+        [[ -s "$b/his_states.txt" && -s "$b/prepare.log" ]] || continue
+        h=$(cat "$b/his_states.txt")
+        q=$(grep -E "^Total charge" "$b/prepare.log" | tail -n 1 | grep -oE -- '-?[0-9]+\.[0-9]+' || true)
+        log "$(printf '%-11s' "$ff") HIS: [${h% }]  net charge: ${q:-?}"
+        if [[ -z $ref_ff ]]; then
+            ref_ff=$ff; ref_h=$h; ref_q=$q; continue
+        fi
+        [[ "$h" == "$ref_h" ]] || warn "histidine states differ between $ff and $ref_ff; set HIS_STATES explicitly and rerun with FORCE=1"
+        [[ "$q" == "$ref_q" ]] || warn "net protein charge differs between $ff and $ref_ff; check termini and protonation"
+    done
 }
 
 # -----------------------------------------------------------------------------
