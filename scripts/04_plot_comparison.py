@@ -784,11 +784,11 @@ def fig_dssp_maps(dssp, skip_ns, fig_dir, formats):
                         ha="center", va="center", color=color_of(ff), fontsize=10, fontweight="bold")
             if i == nrows - 1:
                 ax.set_xlabel("Time (ns)")
-    ss_legend(axes[0][-1] if axes[0][-1].axison else axes[0][0], loc="upper right",
-              ncol=3, fontsize=8, bbox_to_anchor=(1.0, 1.32))
+    handles = [Patch(facecolor=c, edgecolor="black", lw=0.6, label=n) for n, c in zip(SS_NAMES, SS_COLORS)]
     fig.suptitle("Secondary structure (DSSP, three classes); dotted line: start of the averaging window",
                  x=0.01, ha="left", fontsize=9, color=INK_2)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.legend(handles=handles, loc="upper right", ncol=3, fontsize=8, bbox_to_anchor=(0.99, 0.995))
     save(fig, fig_dir, "fig8_dssp_maps", formats)
 
 
@@ -993,8 +993,10 @@ def main():
     if len(found) < 2:
         print("  note: only one force field found; difference panels are skipped")
     if args.reference not in found:
-        print(f"  note: reference '{args.reference}' not found; difference panels are skipped "
-              f"(use --reference with one of: {', '.join(found)})")
+        fallback = next(iter(found))
+        print(f"  note: reference '{args.reference}' not found; using '{fallback}' as reference "
+              f"(choose another with --reference: {', '.join(found)})")
+        args.reference = fallback
     nrep = {len(r) for r in found.values()}
     if nrep != {1} and min(nrep) < 3:
         print("  note: fewer than 3 replicas for some force fields; SD over replicas is unreliable")

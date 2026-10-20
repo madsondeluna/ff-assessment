@@ -43,6 +43,7 @@ ff-assessment/
 │   └── gromos54a7/              same files for GROMOS 54A7
 ├── scripts/
 │   ├── lib.sh                   shared bash helpers (force field table, PDB cleaning)
+│   ├── check.sh                 pre-flight check: GROMACS, force fields, Python, disk
 │   ├── get_structure.sh         download PDB_ID from the RCSB and clean it
 │   ├── 00_make_mdps.sh          writes mdp/ from config.sh
 │   ├── 01_prepare.sh            build, ions, EM, NVT, NPT, production .tpr
@@ -58,17 +59,54 @@ ff-assessment/
 └── figures/                     final figures, summary_statistics.csv, summary_table.csv
 ```
 
+## Setup on a new machine (Ubuntu)
+
+Five commands, then a check that tells you what is still missing and how to
+get it:
+
+```bash
+sudo apt install gromacs python3-venv curl          # GROMACS 2023.3 on Ubuntu 24.04
+git clone https://github.com/madsondeluna/ff-assessment.git
+cd ff-assessment
+python3 -m venv ~/.venvs/ffa && source ~/.venvs/ffa/bin/activate && pip install -r requirements.txt
+bash scripts/check.sh
+```
+
+`check.sh` finds the GROMACS executable on its own (the first of `gmx`,
+`gmx_mpi`, `gmx_d`, `gmx_mpi_d` in `PATH`; on a machine with a single
+installation, from apt, conda or a module, nothing needs to be configured),
+prints its version and whether it has GPU support, and then lists every force
+field with `[ok]` or `[MISSING]`. For a missing one it prints the download
+address and the exact commands; GROMOS 53A6, GROMOS 54A7 and the AMBER
+fallback ship with GROMACS, so on a fresh machine the only thing it asks for
+is the CHARMM36 port (next section). `run_all.sh` runs the same check first
+and stops if something required is absent. Example of the output on a
+machine without the port:
+
+```
+Force fields (FF_LABELS: charmm36m amber gromos53a6 gromos54a7)
+  [MISSING] charmm36m: directory 'charmm36-feb2026_cgenff-5.0.ff' not found in forcefields/ ...
+            The CHARMM36 port is not distributed with GROMACS. Download it by hand:
+              1. open https://mackerell.umaryland.edu/charmm_ff.shtml#gromacs in a browser
+              ...
+  [ok]      amber: AMBER ff99SB-ILDN -> /usr/share/gromacs/top/amber99sb-ildn.ff (water: tip3p)
+  [note]    ff14SB is not in this GROMACS (built in from 2026); using ff99SB-ILDN ...
+  [ok]      gromos53a6: GROMOS 53A6 -> /usr/share/gromacs/top/gromos53a6.ff (water: spc)
+  [ok]      gromos54a7: GROMOS 54A7 -> /usr/share/gromacs/top/gromos54a7.ff (water: spc)
+```
+
 ## Requirements
 
 | Software | Version | Notes |
 |---|---|---|
-| GROMACS | 2023 or newer | `gmx` or `gmx_mpi` (set `GMX`); native `gmx dssp`; 2026 or newer for the built-in AMBER ff14SB/ff19SB |
-| CHARMM36 GROMACS port | February 2026 release recommended | download separately, see below |
-| Python | 3.9 or newer | `pip install -r requirements.txt` |
+| GROMACS | 2023 or newer | autodetected; set `GMX` only when several versions are installed; 2026 or newer for the built-in AMBER ff14SB/ff19SB |
+| CHARMM36 GROMACS port | most recent release | downloaded by hand from the MacKerell lab, see below |
+| Python | 3.9 or newer | `pip install -r requirements.txt` (numpy, matplotlib; scipy optional) |
 | bash, awk, sed, curl or wget | any recent | standard on Linux and macOS |
 
-GROMOS 53A6 and GROMOS 54A7 are distributed with every GROMACS version and
-need no download.
+GROMOS 53A6, GROMOS 54A7 and AMBER ff99SB-ILDN are distributed with every
+GROMACS version and need no download. A GPU is optional: without one the
+runs are slower but identical.
 
 ### Force field labels
 
@@ -78,26 +116,47 @@ the family decides the nonbonded and constraint settings.
 
 | Label | Family | Force field directory | Water | Where it comes from |
 |---|---|---|---|---|
-| `charmm36m` | charmm | `CHARMM_FF` (default `charmm36-feb2026_cgenff-5.0`) | CHARMM TIP3P | MacKerell lab port, in `forcefields/` |
-| `amber` | amber | `AMBER_FF` (default `amber14sb`) | `AMBER_WATER` (default TIP3P) | built into GROMACS >= 2026, or a port in `forcefields/` |
+| `charmm36m` | charmm | `CHARMM_FF` (default `charmm36-feb2026_cgenff-5.0`) | CHARMM TIP3P | MacKerell lab port, downloaded by hand into `forcefields/` |
+| `amber` | amber | `AMBER_FF` (default `auto`: ff14SB if available, else ff99SB-ILDN) | `AMBER_WATER` (default TIP3P) | built into GROMACS, or a port in `forcefields/` |
 | `gromos53a6` | gromos | `gromos53a6` | SPC | built into GROMACS |
 | `gromos54a7` | gromos | `gromos54a7` | SPC | built into GROMACS |
 
-### CHARMM36m
+### CHARMM36m: manual download
 
-The CHARMM36 port is not distributed with GROMACS. Download it from the
-MacKerell lab (<https://mackerell.umaryland.edu/charmm_ff.shtml#gromacs>) and
-extract it into `forcefields/`:
+The CHARMM36 port is not distributed with GROMACS and cannot be fetched by a
+script (the site asks for a registration). Do it once by hand:
 
-```bash
-tar -xzf charmm36-feb2026_cgenff-5.0.ff.tgz -C forcefields/
-```
+1. Open <https://mackerell.umaryland.edu/charmm_ff.shtml#gromacs> in a
+   browser and register with an e-mail address.
+2. Under "GROMACS", download the most recent `charmm36-<month><year>.ff.tgz`
+   (for example `charmm36-feb2026_cgenff-5.0.ff.tgz`). Do not take the
+   `lj-pme` variant: it needs a different nonbonded protocol.
+3. Copy the file to the machine that will run the simulations and extract it
+   into `forcefields/`:
+
+   ```bash
+   scp ~/Downloads/charmm36-*.ff.tgz user@workstation:~/ff-assessment/forcefields/
+   tar -xzf forcefields/charmm36-*.ff.tgz -C forcefields/
+   ls forcefields/            # one directory ending in .ff
+   ```
+
+4. If the directory is not `charmm36-feb2026_cgenff-5.0.ff`, tell the scripts
+   its name without the `.ff` suffix, either on the command line or by
+   editing `CHARMM_FF` in `config.sh`:
+
+   ```bash
+   export CHARMM_FF=charmm36-jul2022
+   ```
+
+5. Run `bash scripts/check.sh` again: the `charmm36m` line must now say
+   `[ok]`.
 
 The current ports contain the CHARMM36m protein parameters by default (the
 `m` revision of the protein backbone CMAP); lipids, ions and water are the
-CHARMM36 ones. If you use another release, set `CHARMM_FF` in `config.sh` to
-the directory name without the `.ff` suffix. Do not use the LJ-PME variant of
-the port with these `.mdp` files: it requires a different nonbonded protocol.
+CHARMM36 ones. To start the other three force fields while the port is on
+its way: `FF_LABELS="amber gromos53a6 gromos54a7" bash scripts/run_all.sh`;
+running the script again later with the default labels adds the CHARMM runs
+without touching the finished ones.
 
 ### AMBER
 
@@ -106,12 +165,14 @@ and `AMBER_WATER`:
 
 | `AMBER_FF` | `AMBER_WATER` | Availability | Notes |
 |---|---|---|---|
-| `amber14sb` (default) | `tip3p` | GROMACS >= 2026 | ff14SB, the usual reference AMBER force field; 3-site water like the other three systems |
+| `auto` (default) | `tip3p` | any | `amber14sb` when the installed GROMACS (or `forcefields/`) has it, otherwise `amber99sb-ildn`, with a warning in the log and the name in the figures |
+| `amber14sb` | `tip3p` | GROMACS >= 2026 | ff14SB, the usual reference AMBER force field; 3-site water like the other three systems |
 | `amber19sb` | `opc` (or `opc3`) | GROMACS >= 2026 | ff19SB with per-residue CMAP; OPC is a 4-site model (about 30 percent more water sites). The release notes call both ports validation pending |
-| `amber99sb-ildn` | `tip3p` | every GROMACS | the fallback when only GROMACS < 2026 is available |
+| `amber99sb-ildn` | `tip3p` | every GROMACS | what `auto` picks on GROMACS 2023 to 2025 (Ubuntu 24.04 ships 2023.3) |
 
 Older GROMACS versions can also use a user-contributed ff14SB/ff19SB port
-extracted into `forcefields/` and named in `AMBER_FF`, as for CHARMM. The
+extracted into `forcefields/` and named in `AMBER_FF`, as for CHARMM (the
+`check.sh` output says so when ff14SB is not found). The
 scripts check that ff19SB is paired with OPC and that the solvent box used
 by `gmx solvate` matches the water model (3-site or 4-site). The ion
 molecule names are read from the ion `.itp` that `pdb2gmx` includes in the
@@ -121,13 +182,16 @@ model.
 ## Quick start
 
 ```bash
-# 1. CHARMM port (the structure is downloaded automatically)
-tar -xzf charmm36-feb2026_cgenff-5.0.ff.tgz -C forcefields/
-
-# 2. load GROMACS (example for a module system)
+# 0. (module systems only) load GROMACS; apt and conda installs are found by themselves
 module load gromacs
 
-# 3. everything, in sequence, detached, with a log
+# 1. check: GROMACS found, force fields found, Python packages installed
+bash scripts/check.sh
+
+# 2. optional: a 10 minute smoke test of the whole pipeline before the real campaign
+PROD_NS=0.1 N_REPLICAS=1 NVT_PS=10 NPT_PS=10 bash scripts/run_all.sh && rm -rf runs analysis figures logs
+
+# 3. everything, in sequence, detached, with a log (GPU: see below)
 nohup bash scripts/run_all.sh > /dev/null 2>&1 &
 
 # 4. follow the campaign
@@ -135,11 +199,16 @@ tail -f logs/pipeline_latest.log      # every line of every stage
 bash scripts/status.sh                # one line per run: stage, ns done, %, ns/day
 ```
 
-`run_all.sh` chains `get_structure.sh` (download and clean 1UBQ),
-`01_prepare.sh` (four systems, three replicas each), `02_run_production.sh`
-(12 runs), `03_analysis.sh` and `04_plot_comparison.py`; each stage starts
-only when the previous one has finished, and rerunning the script skips what
-is already done. The stages can also be run one by one:
+With an NVIDIA GPU and a CUDA build of GROMACS (`check.sh` prints "GPU
+support: CUDA"), export `MDRUN_FLAGS="-nb gpu -pme gpu -bonded gpu"` before
+step 3. With the Ubuntu apt build (CPU only) leave it empty.
+
+`run_all.sh` chains `check.sh`, `get_structure.sh` (download and clean
+1UBQ), `01_prepare.sh` (four systems, three replicas each),
+`02_run_production.sh` (12 runs), `03_analysis.sh` and
+`04_plot_comparison.py`; each stage starts only when the previous one has
+finished, and rerunning the script skips what is already done. The stages
+can also be run one by one:
 
 ```bash
 bash scripts/get_structure.sh          # input/1ubq.pdb (and 1ubq_raw.pdb)
@@ -171,14 +240,16 @@ so that a one-replica comparison is available after the first four runs;
 | `runs/<ff>/rep<N>/md_stdout.log`, `md.log` | mdrun output of each run |
 | `bash scripts/status.sh` | table: build and equilibration state, production state (running, stopped, finished), ns done, percent, ns/day, analysis up to date or stale |
 
-Any variable in `config.sh` can be overridden on the command line:
+Any variable in `config.sh` can be overridden on the command line or
+exported in the shell before `nohup`:
 
 ```bash
 NT=9 MDRUN_FLAGS="-nb gpu -pme gpu -bonded gpu" bash scripts/02_run_production.sh
+GMX=/opt/gromacs-2026/bin/gmx bash scripts/check.sh            # several GROMACS versions installed
 AMBER_FF=amber19sb AMBER_WATER=opc bash scripts/01_prepare.sh amber
-AMBER_FF=amber99sb-ildn bash scripts/01_prepare.sh amber      # GROMACS < 2026
+FF_LABELS="amber gromos53a6 gromos54a7" bash scripts/run_all.sh  # without CHARMM for now
 PDB_ID=1PGA INPUT_PDB=input/1pga.pdb bash scripts/run_all.sh   # another protein
-PROD_NS=5 N_REPLICAS=1 bash scripts/run_all.sh                # smoke test
+PROD_NS=5 N_REPLICAS=1 bash scripts/run_all.sh                # short test
 ```
 
 Ubiquitin in a 1.2 nm dodecahedron is a small system (around 20 000 atoms
@@ -192,15 +263,16 @@ The most relevant variables in `config.sh`:
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `GMX` | empty (autodetect) | GROMACS executable; set only when several versions are installed |
 | `PDB_ID` | `1UBQ` | entry downloaded and cleaned when `INPUT_PDB` is missing (empty disables) |
 | `INPUT_PDB` | `input/1ubq.pdb` | input structure |
 | `CHAIN` | `A` | chain(s) to keep; empty string keeps all |
 | `HIS_STATES` | `auto` | histidine protonation, one letter per HIS: `D` (ND1), `E` (NE2), `P` (both) |
 | `ALLOW_GAPS` | `0` | stop when missing residues are detected |
-| `FF_LABELS` | `charmm36m amber gromos53a6 gromos54a7` | force fields to build and compare |
+| `FF_LABELS` | `charmm36m amber gromos53a6 gromos54a7` | force fields to build and compare (a space-separated string when set from the environment) |
 | `FF_REFERENCE` | `charmm36m` | reference for the difference panels (also `--reference` in the plot script) |
 | `CHARMM_FF` | `charmm36-feb2026_cgenff-5.0` | CHARMM36 port directory in `forcefields/` |
-| `AMBER_FF`, `AMBER_WATER` | `amber14sb`, `tip3p` | AMBER force field and water model |
+| `AMBER_FF`, `AMBER_WATER` | `auto`, `tip3p` | AMBER force field (ff14SB if available, else ff99SB-ILDN) and water model |
 | `BOX_TYPE`, `BOX_DIST` | `dodecahedron`, `1.2` nm | simulation cell |
 | `SALT_CONC` | `0.15` M | NaCl added after neutralization |
 | `TEMP` | `300` K | temperature |

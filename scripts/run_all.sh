@@ -2,7 +2,7 @@
 # =============================================================================
 # run_all.sh
 # The whole campaign, strictly in sequence, in one detached process:
-#   get_structure -> 01_prepare -> 02_run_production -> 03_analysis -> 04_plot
+#   check -> get_structure -> 01_prepare -> 02_run_production -> 03_analysis -> 04_plot
 # Each stage starts only when the previous one has finished, and every line
 # of output is copied to logs/pipeline_<timestamp>.log. Rerunning the script
 # skips what is already done (each stage checks its own outputs).
@@ -35,8 +35,9 @@ stage() {
 
 log "pipeline log: $PIPE_LOG"
 log "force fields: ${FF_LABELS[*]} | replicas: $N_REPLICAS | production: ${PROD_NS} ns | threads: $NT"
+stage "check"      bash "$REPO_ROOT/scripts/check.sh"
 stage "prepare"    bash "$REPO_ROOT/scripts/01_prepare.sh" "$@"
 stage "production" bash "$REPO_ROOT/scripts/02_run_production.sh" "$@"
 stage "analysis"   bash "$REPO_ROOT/scripts/03_analysis.sh" "$@"
-stage "figures"    python3 "$REPO_ROOT/scripts/04_plot_comparison.py"
+stage "figures"    python3 "$REPO_ROOT/scripts/04_plot_comparison.py" --reference "$FF_REFERENCE"
 log "pipeline finished. Figures: $FIG_DIR/"

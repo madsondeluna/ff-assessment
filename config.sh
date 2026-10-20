@@ -11,9 +11,12 @@
 # -----------------------------------------------------------------------------
 # GROMACS executable and parallelism
 # -----------------------------------------------------------------------------
-# gmx, gmx_mpi, or a full path. Requires GROMACS >= 2023 (>= 2026 for the
-# built-in AMBER ff14SB / ff19SB ports, see below).
-GMX="${GMX:-gmx}"
+# GROMACS executable. Empty = autodetect: the first of gmx, gmx_mpi, gmx_d,
+# gmx_mpi_d found in PATH (so a machine with a single GROMACS installation,
+# from apt, conda or a module, needs no configuration). Set it explicitly
+# (name or full path) only when several versions are installed.
+# Requires GROMACS >= 2023 (>= 2026 for the built-in AMBER ff14SB / ff19SB).
+GMX="${GMX:-}"
 
 # OpenMP threads for mdrun. Default: all cores minus one (keeps one core free).
 _ncores=$(nproc 2>/dev/null || echo 2)
@@ -68,9 +71,14 @@ HIS_STATES="${HIS_STATES:-auto}"
 # force-field family (charmm, amber, gromos) decides the nonbonded and
 # constraint settings written by scripts/00_make_mdps.sh.
 #
-# Remove a label from this list to skip that force field, or pass labels on
-# the command line:  bash scripts/01_prepare.sh charmm36m amber
-FF_LABELS=(charmm36m amber gromos53a6 gromos54a7)
+# Remove a label from this list to skip that force field, override it from
+# the environment (FF_LABELS="amber gromos54a7" bash scripts/run_all.sh), or
+# pass labels on the command line:  bash scripts/01_prepare.sh charmm36m amber
+# (bash cannot export arrays: the list is kept as the exported string
+# FF_LABELS_STR for child scripts and converted to an array here)
+FF_LABELS_STR="${FF_LABELS:-${FF_LABELS_STR:-charmm36m amber gromos53a6 gromos54a7}}"
+export FF_LABELS_STR
+read -r -a FF_LABELS <<<"$FF_LABELS_STR"
 
 # Reference force field for the difference panels in 04_plot_comparison.py
 # (every other force field is plotted as "ff minus reference").
@@ -86,17 +94,17 @@ CHARMM_WATER="${CHARMM_WATER:-tip3p}"      # CHARMM-modified TIP3P (LJ on H)
 
 # --- AMBER -------------------------------------------------------------------
 # Which AMBER protein force field the label "amber" refers to:
+#   auto           amber14sb when the installed GROMACS (or forcefields/)
+#                  has it, otherwise amber99sb-ildn, with a warning. Default.
 #   amber14sb      ff14SB, TIP3P. Built into GROMACS >= 2026 (validation
-#                  pending per the release notes). Default: the usual
-#                  reference AMBER force field and a 3-site water like the
-#                  other three systems.
+#                  pending per the release notes): the usual reference AMBER
+#                  force field and a 3-site water like the other systems.
 #   amber19sb      ff19SB with OPC (4-site water, per-residue CMAP). Built
 #                  into GROMACS >= 2026; requires AMBER_WATER=opc (or opc3).
-#   amber99sb-ildn ships with every GROMACS version; use it when GROMACS
-#                  < 2026 is the only option (AMBER_WATER=tip3p).
+#   amber99sb-ildn ships with every GROMACS version (AMBER_WATER=tip3p).
 # A user-contributed port can be extracted into forcefields/ and named here
-# the same way as the CHARMM port.
-AMBER_FF="${AMBER_FF:-amber14sb}"
+# the same way as the CHARMM port (directory name without .ff).
+AMBER_FF="${AMBER_FF:-auto}"
 AMBER_WATER="${AMBER_WATER:-tip3p}"        # standard TIP3P (no LJ on H)
 
 # --- GROMOS 53A6 and 54A7 (ship with GROMACS) ----------------------------------

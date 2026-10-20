@@ -204,7 +204,9 @@ crosscheck() {
             ref_ff=$ff; ref_h=$h; ref_q=$q; continue
         fi
         [[ "$h" == "$ref_h" ]] || warn "histidine states differ between $ff and $ref_ff; set HIS_STATES explicitly and rerun with FORCE=1"
-        [[ "$q" == "$ref_q" ]] || warn "net protein charge differs between $ff and $ref_ff; check termini and protonation"
+        if [[ -n "$q" && -n "$ref_q" ]] && ! awk "BEGIN{exit !(($q - $ref_q)^2 < 0.01)}"; then
+            warn "net protein charge differs between $ff ($q) and $ref_ff ($ref_q); check termini and protonation"
+        fi
     done
 }
 

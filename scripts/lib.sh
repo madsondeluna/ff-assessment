@@ -57,8 +57,23 @@ gmx_run_input() {
     fi
 }
 
+# Autodetect the GROMACS executable when GMX is empty.
+detect_gmx() {
+    [[ -n "$GMX" ]] && return 0
+    local c
+    for c in gmx gmx_mpi gmx_d gmx_mpi_d; do
+        if command -v "$c" >/dev/null 2>&1; then GMX=$c; return 0; fi
+    done
+    return 1
+}
+
 check_gmx() {
-    command -v "$GMX" >/dev/null 2>&1 || die "'$GMX' not found. Load GROMACS (e.g. 'module load gromacs') or set GMX."
+    detect_gmx || die "GROMACS not found in PATH (looked for gmx, gmx_mpi, gmx_d, gmx_mpi_d).
+  Ubuntu:        sudo apt install gromacs          (2023.3 on Ubuntu 24.04)
+  conda:         conda install -c conda-forge gromacs
+  module system: module load gromacs
+  or set GMX to the executable, e.g. GMX=/opt/gromacs/bin/gmx"
+    command -v "$GMX" >/dev/null 2>&1 || die "'$GMX' not found (GMX is set explicitly; check the name or path)."
     local ver major
     ver=$("$GMX" -quiet --version 2>/dev/null | awk -F': *' '/^GROMACS version/{print $2; exit}')
     major=$(sed -E 's/^([0-9]{4}).*/\1/' <<<"$ver")
@@ -66,6 +81,7 @@ check_gmx() {
     (( major >= 2023 )) || die "GROMACS >= 2023 required, found $ver"
     GMX_VERSION="$ver"
     GMX_MAJOR="$major"
+    resolve_amber_ff
 }
 
 # True if a gmx subcommand exists (used to pick legacy tools in 2024+).
@@ -97,10 +113,24 @@ ff_family() {
     esac
 }
 
+# AMBER_FF=auto: amber14sb when available (GROMACS >= 2026 or a port in
+# forcefields/), otherwise the built-in amber99sb-ildn. Resolved once.
+resolve_amber_ff() {
+    [[ "$AMBER_FF" == auto ]] || return 0
+    [[ -n "$GMX" ]] || detect_gmx || true
+    if [[ -n "$GMX" ]] && AMBER_FF=amber14sb ff_path amber >/dev/null 2>&1; then
+        AMBER_FF=amber14sb
+    else
+        AMBER_FF=amber99sb-ildn
+        [[ "${_AMBER_WARNED:-0}" == 1 ]] || warn "AMBER_FF=auto: amber14sb not available in this GROMACS; using the built-in amber99sb-ildn (set AMBER_FF to override)"
+        _AMBER_WARNED=1
+    fi
+}
+
 ff_dir_name() {
     case "$1" in
         charmm36m)  echo "$CHARMM_FF" ;;
-        amber)      echo "$AMBER_FF" ;;
+        amber)      resolve_amber_ff; echo "$AMBER_FF" ;;
         gromos53a6) echo "$GROMOS53_FF" ;;
         gromos54a7) echo "$GROMOS54_FF" ;;
         *) die "unknown force field label '$1' (use: ${FF_LABELS[*]})" ;;
@@ -124,6 +154,7 @@ ff_display_name() {
         gromos53a6) echo "GROMOS 53A6" ;;
         gromos54a7) echo "GROMOS 54A7" ;;
         amber)
+            resolve_amber_ff
             case "$AMBER_FF" in
                 amber14sb*)      echo "AMBER ff14SB" ;;
                 amber19sb*)      echo "AMBER ff19SB" ;;
